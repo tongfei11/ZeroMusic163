@@ -33,7 +33,7 @@ packages = json.loads((app / "package-lock.json").read_text())["packages"]
 for name, details in packages.items():
     if not name:
         continue
-    manifest = source.parent / name / "package.json"
+    manifest = source / name.removeprefix("node_modules/") / "package.json"
     if json.loads(manifest.read_text())["version"] != details["version"]:
         raise SystemExit(f"Dependency version mismatch: {name}")
 
@@ -49,7 +49,6 @@ else
     # The app plays through system mpv. ffprobe-static ships no Linux ARM64 binary.
     rm -rf "$app/node_modules/ffprobe-static/bin"
 fi
-# The app plays through system mpv. ffprobe-static ships no Linux ARM64 binary.
 node "$app/node_modules/@music163/ncm-cli/dist/index.js" --version
 
 sed 's@/usr/local/lib/zero-music163/@/usr/lib/zero-music163/@' "$root/zero-music163.desktop" \
@@ -83,4 +82,5 @@ Homepage: https://github.com/tongfei11/ZeroMusic163
 Description: NetEase Cloud Music player for Cardputer Zero
  Browse playlists, search and play music from the built-in keyboard.
 CONTROL
+chmod -R go-w "$stage"
 dpkg-deb --root-owner-group -Zxz -z3 --build "$stage" "$root/dist/zero-music163_${version}_arm64.deb"
