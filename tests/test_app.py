@@ -46,6 +46,12 @@ class FakeClient:
     def is_preloaded(self, _track):
         return False
 
+    def is_audio_prefetched(self, _track):
+        return False
+
+    def prefetch_audio(self, _track):
+        return False
+
     def lyrics(self, _track_id):
         return ""
 
@@ -124,6 +130,21 @@ class AppTest(unittest.TestCase):
         self.key("7")
         self.wait("play")
         self.assertEqual(self.client.plays[-1], preloaded[0])
+
+    def test_only_immediate_next_song_prefetches_audio(self):
+        self.app.player.current = song()
+        self.app.player.upcoming = [song(id="next"), song(id="later")]
+        self.app.player.status = "playing"
+        self.client.is_preloaded = lambda _track: True
+        downloads = []
+        self.client.prefetch_audio = lambda track: downloads.append(track["id"])
+
+        self.time = 3
+        self.app.tick()
+        self.wait("prefetch-audio")
+        self.app.tick()
+        self.assertEqual(downloads, ["next"])
+        self.assertNotIn("prefetch-audio", self.app.jobs)
 
     def test_cached_next_does_not_wait_for_lyrics_cli(self):
         self.app.player.current = song()

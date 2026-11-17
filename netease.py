@@ -1,6 +1,7 @@
 """Adapter for the official @music163/ncm-cli 0.1.7."""
 from collections import OrderedDict
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -8,14 +9,17 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from threading import Lock, RLock
+from threading import Event, Lock, RLock
 import time
 from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from mpv_ipc import Mpv, MpvError
 
 
 PLAYLIST_PAGE_SIZE = 30
+AUDIO_CACHE_LIMIT = 8 * 1024 * 1024
+AUDIO_CACHE_RATE = 128 * 1024
 
 
 class NeteaseError(Exception):
@@ -40,6 +44,9 @@ class Netease:
         self._player = None
         self._media_urls = OrderedDict()
         self._media_lock = Lock()
+        self._audio_cache = None
+        self._cancel_audio = Event()
+        self._audio_fetch_key = None
 
     def configured(self) -> bool:
         home = self._current
@@ -139,6 +146,22 @@ class Netease:
             self._closing = True
             if self._process and self._process.poll() is None:
                 self._process.kill()
+        self._cancel_audio.set()
+        self._discard_audio_cache()
+
+    def _discard_audio_cache(self):
+        with self._media_lock:
+            cached, self._audio_cache = self._audio_cache, None
+            self._cancel_audio.set()
+        if cached is not None:
+            self._unlink_audio(cached[2])
+
+    @staticmethod
+    def _unlink_audio(path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     @staticmethod
     def _error(payload, stderr=""):
@@ -206,6 +229,7 @@ class Netease:
                 self._pending_login = (time.monotonic(), qr)
                 with self._media_lock:
                     self._media_urls.clear()
+                self._discard_audio_cache()
                 if self._player is not None:
                     self._player.close()
                     self._player = None
@@ -266,6 +290,7 @@ class Netease:
             self._pending_login = None
             with self._media_lock:
                 self._media_urls.clear()
+            self._discard_audio_cache()
 
     @staticmethod
     def _record(record):
@@ -353,14 +378,90 @@ class Netease:
 
     def is_preloaded(self, track):
         key = str(track["id"]), str(track["originalId"])
-        return self._cached_media(key) is not None
+        return self.is_audio_prefetched(track) or self._cached_media(key) is not None
+
+    def is_audio_prefetched(self, track):
+        key = str(track["id"]), str(track["originalId"])
+        with self._media_lock:
+            return (self._audio_cache is not None and self._audio_cache[0] == key
+                    and self._audio_cache[3] > time.time() * 1000)
 
     def preload(self, track):
         home, key = self._track_location(track)
         if self._cached_media(key) is None:
             self._fetch_media(home, key)
 
+    def prefetch_audio(self, track):
+        """Download one playable file using an already-authorized address."""
+        if self.is_audio_prefetched(track):
+            return True
+        staging = None
+        try:
+            home, key = self._track_location(track)
+            with self._media_lock:
+                media = self._media_urls.get(key)
+                if media is None or media[1] <= time.time() * 1000 + 5000 or self._closing:
+                    return False
+                cached, self._audio_cache = self._audio_cache, None
+                self._audio_fetch_key = key
+                self._cancel_audio.clear()
+            if cached is not None:
+                self._unlink_audio(cached[2])
+            url, expiry = media
+            start = time.monotonic()
+            with urlopen(url, timeout=3) as response:
+                length = response.length
+                if response.status != 200 or (length is not None and not 0 < length <= AUDIO_CACHE_LIMIT):
+                    return False
+                with tempfile.NamedTemporaryFile(dir=self.profile, prefix=".next-audio-", delete=False) as output:
+                    staging = Path(output.name)
+                    size = 0
+                    while not self._cancel_audio.is_set() and time.monotonic() - start < 75:
+                        chunk = response.read1(32768)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > AUDIO_CACHE_LIMIT:
+                            return False
+                        output.write(chunk)
+                        self._cancel_audio.wait(max(0, start + size / AUDIO_CACHE_RATE - time.monotonic()))
+                    else:
+                        return False
+            if not size or (length is not None and size != length):
+                return False
+            with self._media_lock:
+                if (self._closing or self._cancel_audio.is_set() or self._media_urls.get(key) != media
+                        or expiry <= time.time() * 1000):
+                    return False
+                self._audio_cache = key, home, staging, expiry
+                staging = None
+            return True
+        except (OSError, HTTPException, NeteaseError, ValueError):
+            return False
+        finally:
+            with self._media_lock:
+                self._audio_fetch_key = None
+            if staging is not None:
+                self._unlink_audio(staging)
+
     def _try_cached_play(self, home, key, volume, position):
+        local = None
+        with self._media_lock:
+            if self._audio_fetch_key == key:
+                self._cancel_audio.set()
+            cached = self._audio_cache
+            if cached is not None and cached[:2] == (key, home):
+                local, self._audio_cache = cached, None
+        if local is not None:
+            path, expiry = local[2:]
+            try:
+                if expiry > time.time() * 1000:
+                    self._play_url(home, str(path), volume, position)
+                    return True
+            except MpvError:
+                pass
+            finally:
+                self._unlink_audio(path)
         url = self._cached_media(key)
         if url is None:
             return False

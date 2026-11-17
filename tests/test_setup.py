@@ -1,12 +1,14 @@
 import http.client
+from io import BytesIO
 import json
 from pathlib import Path
 import shutil
 import time
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from netease import Netease, NeteaseError
+from netease import AUDIO_CACHE_LIMIT, Netease, NeteaseError
 from setup_web import SetupWeb
 
 
@@ -88,6 +90,44 @@ class BackendSetupTest(unittest.TestCase):
 
 
 class MediaCacheTest(unittest.TestCase):
+    def test_next_audio_is_played_from_disk_and_deleted_after_open(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = Netease(root, "fake-cli")
+            client._current.mkdir()
+            client._runtime = lambda _home: root
+            song = {"id": "song", "originalId": "123"}
+            client._media_urls[("song", "123")] = ("https://example.test/song", time.time() * 1000 + 60000)
+            audio = BytesIO(b"audio-data")
+            audio.status, audio.length = 200, 10
+            with patch("netease.urlopen", return_value=audio):
+                self.assertTrue(client.prefetch_audio(song))
+            self.assertTrue(client.is_audio_prefetched(song))
+            loaded = []
+            client._play_url = lambda _home, path, *_options: loaded.append(Path(path).read_bytes())
+            self.assertTrue(client.play_cached(song))
+            self.assertEqual(loaded, [b"audio-data"])
+            self.assertFalse(client.is_audio_prefetched(song))
+            self.assertEqual(list(root.glob(".next-audio-*")), [])
+
+    def test_oversized_prefetch_uses_existing_stream_address(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = Netease(root, "fake-cli")
+            client._current.mkdir()
+            client._runtime = lambda _home: root
+            song = {"id": "song", "originalId": "123"}
+            url = "https://example.test/song"
+            client._media_urls[("song", "123")] = (url, time.time() * 1000 + 60000)
+            audio = BytesIO()
+            audio.status, audio.length = 200, AUDIO_CACHE_LIMIT + 1
+            with patch("netease.urlopen", return_value=audio):
+                self.assertFalse(client.prefetch_audio(song))
+            played = []
+            client._play_url = lambda _home, source, *_options: played.append(source)
+            self.assertTrue(client.play_cached(song))
+            self.assertEqual(played, [url])
+
     def test_replay_reuses_an_unexpired_authorized_address(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

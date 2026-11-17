@@ -56,6 +56,7 @@ class App:
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ncm")
         self.images = ThreadPoolExecutor(max_workers=1, thread_name_prefix="images")
         self.audio = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio")
+        self.downloads = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch")
         self.settings_path = Path(settings_path) if settings_path else None
         self.resume_path = self.settings_path.with_name("playback.json") if self.settings_path else None
         settings = load_resume(self.settings_path) if self.settings_path else {}
@@ -95,16 +96,19 @@ class App:
         self.like_pending = None
         self.requested_volume = None
         self.preload_attempt = set()
+        self.audio_prefetch_attempt = None
         self.shuffle_next = []
         self.last_key_at = self.clock()
         self.next_poll = 0
         self.notice_text, self.notice_until = "", 0
         self.start()
 
-    def submit(self, key, action, success, failure=None, *, image=False, cached=False):
+    def submit(self, key, action, success, failure=None, *, image=False, cached=False, download=False):
         if key not in self.jobs:
             if image:
                 executor = self.images
+            elif download:
+                executor = self.downloads
             elif cached or key in ("position", "control", "volume"):
                 executor = self.audio
             else:
@@ -292,6 +296,7 @@ class App:
         self.artwork_url, self.artwork = "", None
         self.lyric_cache.clear()
         self.preload_attempt.clear()
+        self.audio_prefetch_attempt = None
         self.shuffle_next.clear()
 
     def show_artwork(self, track):
@@ -798,7 +803,8 @@ class App:
         if source is None or self.clock() < source.retry_at:
             return
         if index <= PRELOAD_TRACKS or self.queue_flip is not None:
-            if any(key not in ("position", "control", "volume") and not key.startswith(("cover-", "avatar-"))
+            if any(key not in ("position", "control", "volume", "prefetch-audio")
+                   and not key.startswith(("cover-", "avatar-"))
                    for key in self.jobs):
                 return
 
@@ -817,11 +823,21 @@ class App:
         player = self.player
         if player.status != "playing" or not player.current:
             return
-        if any(key not in ("position", "control", "volume") and not key.startswith(("cover-", "avatar-"))
+        if any(key not in ("position", "control", "volume", "prefetch-audio")
+               and not key.startswith(("cover-", "avatar-"))
                for key in self.jobs):
             return
         track_id = player.current["id"]
         indices = self.next_indices() if player.mode != 2 else ()
+        if indices and "prefetch-audio" not in self.jobs and self.clock() - self.track_started_at >= 3:
+            following = player.upcoming[indices[0]]
+            plan = (track_id, following["id"])
+            if (self.audio_prefetch_attempt != plan and self.client.is_preloaded(following)
+                    and not self.client.is_audio_prefetched(following)):
+                self.audio_prefetch_attempt = plan
+                self.submit("prefetch-audio", partial(self.client.prefetch_audio, following),
+                            lambda _: None, lambda _error: None, download=True)
+                return
         for index in indices:
             upcoming = player.upcoming[index]
             if upcoming["id"] not in self.preload_attempt and not self.client.is_preloaded(upcoming):
@@ -1113,6 +1129,7 @@ class App:
         self.close_web()
         self.images.shutdown(wait=False, cancel_futures=True)
         self.client.cancel_pending()
+        self.downloads.shutdown(wait=True, cancel_futures=True)
         self.audio.shutdown(wait=True, cancel_futures=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
         player = self.player
