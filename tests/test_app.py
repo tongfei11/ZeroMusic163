@@ -40,6 +40,15 @@ class FakeClient:
     def play(self, track, *, volume):
         self.plays.append(track["id"])
 
+    def preload(self, _track):
+        pass
+
+    def is_preloaded(self, _track):
+        return False
+
+    def lyrics(self, _track_id):
+        return ""
+
     def control(self, command, *args):
         self.controls.append((command, *args))
 
@@ -90,13 +99,76 @@ class AppTest(unittest.TestCase):
         self.assertEqual(self.client.plays, ["one"])
         self.assertEqual([x["id"] for x in self.app.player.upcoming], ["two"])
         self.wait("position")
-        self.key("f")
-        self.wait("control")
+        self.key("d")
+        self.wait("volume")
         self.assertEqual(self.app.player.volume, 80)
-        self.key("c")
+        self.key("7")
         self.wait("play")
         self.assertEqual(self.client.plays, ["one", "two"])
         self.assertEqual(self.app.player.upcoming, [])
+
+    def test_random_mode_prefetches_the_same_track_next_uses(self):
+        first = song()
+        self.app.player.current = first
+        self.app.player.upcoming = [song("晴天", "two"), song("稻香", "three")]
+        self.app.player.status = "playing"
+        self.key("tab")
+        self.key("tab")
+        self.key("4")
+        preloaded = []
+        self.client.preload = lambda track: preloaded.append(track["id"])
+        self.time = 3
+        self.app.tick()
+        self.wait("preload")
+        self.assertEqual(len(preloaded), 1)
+        self.key("7")
+        self.wait("play")
+        self.assertEqual(self.client.plays[-1], preloaded[0])
+
+    def test_cached_next_does_not_wait_for_lyrics_cli(self):
+        self.app.player.current = song()
+        self.app.player.upcoming = [song("晴天", "two")]
+        self.app.player.status = "playing"
+        self.key("tab")
+        self.key("tab")
+        release = Event()
+        self.addCleanup(release.set)
+        self.app.submit("lyric-preview", lambda: release.wait(2), lambda _: None)
+        self.client.is_preloaded = lambda track: track["id"] == "two"
+        self.client.play_cached = lambda track, volume: self.client.plays.append(track["id"]) or True
+        self.key("7")
+        self.wait("play")
+        self.assertEqual(self.app.player.current["id"], "two")
+        self.assertIn("lyric-preview", self.app.jobs)
+        release.set()
+
+    def test_playback_help_and_like_waiting_are_separate_keys(self):
+        self.app.player.current = song()
+        self.app.player.status = "playing"
+        self.key("tab")
+        self.key("tab")
+        self.key("h")
+        self.assertEqual(self.app.view()["heading"], "播放按键")
+        self.key("esc")
+        self.assertIn("playback", self.app.view())
+        released = Event()
+        self.addCleanup(released.set)
+        self.client.like = lambda _id, _liked: released.wait(2)
+        self.key("8")
+        self.assertIn("like_frame", self.app.view()["playback"])
+        self.assertFalse(self.app.view()["playback"]["liked"])
+        released.set()
+        self.wait("like")
+        self.assertNotIn("like_frame", self.app.view()["playback"])
+        self.assertTrue(self.app.view()["playback"]["liked"])
+
+    def test_lyric_preview_follows_playback_position(self):
+        self.app.player.current = song()
+        self.app.player.position = 4
+        self.app.lyric_cache["one"] = [(1, "第一行"), (3, "第二行"), (7, "第三行")]
+        self.key("tab")
+        self.key("tab")
+        self.assertEqual(self.app.view()["lyric_preview"], ["第二行", "第三行"])
 
     def test_enter_shows_loading_playback_before_worker_result(self):
         for key in "qilixiang":
@@ -150,8 +222,8 @@ class AppTest(unittest.TestCase):
     def test_volume_can_be_set_before_playback(self):
         self.key("tab")
         self.key("tab")
-        self.key("x")
-        self.key("x")
+        self.key("s")
+        self.key("volume-down")
         self.assertEqual(self.app.player.volume, 65)
         self.assertFalse(self.client.controls)
         view = self.app.view()

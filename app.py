@@ -17,11 +17,16 @@ from setup_web import SetupWeb
 
 TABS = ("搜索", "歌单", "播放", "队列")
 LIBRARY = [("喜欢的音乐", "favorite"), ("我的歌单", "created"), ("每日推荐", "daily"), ("设置", "settings")]
-SCENES = LIBRARY[:3]
 SETTINGS = [("隐藏不可播放曲目", "hide-unplayable"), ("修改网页配置", "setup"),
             ("重新登录", "login"), ("退出登录", "logout")]
 MOVES = {"f": -1, "up": -1, "x": 1, "down": 1}
-PREVIOUS, NEXT = ("z", "left"), ("c", "right")
+VOLUME = {"s": -5, "volume-down": -5, "d": 5, "volume-up": 5}
+PLAYBACK_HELP = [
+    ("4 模式 · 5 上一首 · 6 播放 / 暂停", ""),
+    ("7 下一首 · 8 收藏 / 取消收藏", ""),
+    ("S / D 调音量 · Tab 换页", ""),
+    ("H / Esc 关闭帮助 · 长按 Esc 退出", ""),
+]
 
 
 @dataclass
@@ -65,7 +70,7 @@ class App:
         self.tab, self.esc_started = 0, None
         self.search = Search()
         self.library = [Page("歌单", "menu", LIBRARY)]
-        self.overlay = None
+        self.help_visible = False
         self.confirmation = None
         self.web = None
         self.qr, self.qr_deadline = "", 0
@@ -79,14 +84,24 @@ class App:
         self.player = Player()
         self.track_started_at = 0
         self.queue_selection = 0
-        self.lyrics_visible, self.lyric_cache = False, {}
+        self.lyric_cache = {}
+        self.like_pending = None
+        self.requested_volume = None
+        self.preload_attempt = None
+        self.shuffle_next = None
+        self.last_key_at = self.clock()
         self.next_poll = 0
         self.notice_text, self.notice_until = "", 0
         self.start()
 
-    def submit(self, key, action, success, failure=None, *, image=False):
+    def submit(self, key, action, success, failure=None, *, image=False, cached=False):
         if key not in self.jobs:
-            executor = self.images if image else self.audio if key in ("position", "control") else self.pool
+            if image:
+                executor = self.images
+            elif cached or key in ("position", "control", "volume"):
+                executor = self.audio
+            else:
+                executor = self.pool
             self.jobs[key] = (executor.submit(action), success, failure)
 
     def tick(self):
@@ -123,6 +138,8 @@ class App:
                 and self.screen == "ready" and self.tab == 1 and not self.jobs):
             self.profile_at = None
             self.submit("profile", self.client.account_status, self.apply_account, lambda _error: None)
+        if self.screen == "ready" and now - self.last_key_at >= 2:
+            self.load_playback_extras()
         if now < self.next_poll:
             return
         if self.screen == "login" and self.qr:
@@ -132,7 +149,7 @@ class App:
                         lambda data: self.finish_login(data) if attempt == self.login_attempt else None,
                         lambda _error: None)
         if self.screen == "ready" and self.player.current and self.player.status in ("starting", "playing", "paused"):
-            if "play" not in self.jobs and "control" not in self.jobs:
+            if not {"play", "control", "volume"} & self.jobs.keys():
                 self.next_poll = now + 0.9
                 self.submit("position", self.client.state, self.position_changed, self.position_error)
 
@@ -187,6 +204,9 @@ class App:
         self.avatar_url, self.avatar = "", None
         self.profile_at = None
         self.artwork_url, self.artwork = "", None
+        self.lyric_cache.clear()
+        self.preload_attempt = None
+        self.shuffle_next = None
 
     def show_artwork(self, track):
         album = track.get("album")
@@ -258,6 +278,8 @@ class App:
             self.next_poll = 0
 
     def key(self, key, value):
+        if value == 1:
+            self.last_key_at = self.clock()
         if key == "esc":
             if value == 1:
                 self.esc_started = self.clock()
@@ -268,7 +290,8 @@ class App:
                 else:
                     self.back()
             return
-        if not value or (value == 2 and key not in (*MOVES, "backspace")):
+        repeatable = key in (*MOVES, "backspace") or (self.tab == 2 and key in VOLUME)
+        if not value or (value == 2 and not repeatable):
             return
         if self.screen != "ready":
             if key == "enter" and self.screen == "need-setup":
@@ -288,6 +311,7 @@ class App:
                     action()
             return
         if key == "tab":
+            self.help_visible = False
             self.tab = (self.tab + 1) % len(TABS)
             return
         if self.tab == 0:
@@ -317,10 +341,7 @@ class App:
             elif self.tab == 1 and len(self.library) > 1:
                 self.library.pop()
             elif self.tab == 2:
-                if self.overlay:
-                    self.overlay = None
-                else:
-                    self.lyrics_visible = False
+                self.help_visible = False
 
     def has_search_job(self):
         return f"search-{self.search.generation}" in self.jobs
@@ -521,7 +542,7 @@ class App:
             return
         volume = self.player.volume
         self.pending_track = track
-        self.lyrics_visible = False
+        self.help_visible = False
         self.show_artwork(track)
         if switch:
             self.tab = 2
@@ -533,7 +554,8 @@ class App:
             self.player.jump(track, remaining, remember=not previous)
             self.track_started_at, self.next_poll = self.clock(), 0
             self.queue_selection = 0
-            self.lyrics_visible = False
+            self.preload_attempt = None
+            self.shuffle_next = None
             self.notice("")
             if self.player.volume != volume:
                 self.submit("control", partial(self.client.control, "volume", str(self.player.volume)), lambda _: None)
@@ -550,11 +572,24 @@ class App:
                 self.player.upcoming = remaining
                 self.advance()
 
+        def resolve_and_play():
+            self.submit("play", partial(self.client.play, track, volume=volume), done, failed)
+
+        def cached_result(played):
+            if played:
+                done(None)
+            else:
+                resolve_and_play()
+
         self.notice("")
-        self.submit("play", partial(self.client.play, track, volume=volume), done, failed)
+        if self.client.is_preloaded(track):
+            self.submit("play", partial(self.client.play_cached, track, volume=volume),
+                        cached_result, failed, cached=True)
+        else:
+            resolve_and_play()
 
     def position_changed(self, state):
-        if "play" in self.jobs or "control" in self.jobs:
+        if {"play", "control", "volume"} & self.jobs.keys():
             return
         if self.player.apply_status(state):
             if self.player.mode == 2:
@@ -563,9 +598,9 @@ class App:
                 self.advance(automatic=True)
         elif self.player.status == "starting" and self.clock() - self.track_started_at > 10:
             self.player.status = "failed"
-            self.notice("载入失败 · Enter 重试 / C 下一首", seconds=8)
+            self.notice("载入失败 · 6 重试 / 7 下一首", seconds=8)
         elif self.player.status == "failed":
-            self.notice("播放中断 · Enter 重试 / C 下一首", seconds=8)
+            self.notice("播放中断 · 6 重试 / 7 下一首", seconds=8)
 
     def position_error(self, error):
         if getattr(error, "reauth", False):
@@ -574,8 +609,44 @@ class App:
             self.player.status = "failed"
             self.error(error)
 
+    def next_index(self):
+        upcoming = self.player.upcoming
+        if not upcoming:
+            return None
+        if self.player.mode != 1:
+            return 0
+        queue = tuple(track.get("id") for track in upcoming)
+        if self.shuffle_next is None or self.shuffle_next[0] != queue:
+            self.shuffle_next = queue, self.player.next_index()
+        return self.shuffle_next[1]
+
+    def load_playback_extras(self):
+        player = self.player
+        if player.status != "playing" or not player.current:
+            return
+        if any(key not in ("position", "control", "volume") and not key.startswith(("cover-", "avatar-"))
+               for key in self.jobs):
+            return
+        track_id = player.current["id"]
+        index = self.next_index() if player.mode != 2 else None
+        if index is not None:
+            upcoming = player.upcoming[index]
+            plan = (track_id, upcoming["id"])
+            if self.preload_attempt != plan:
+                self.preload_attempt = plan
+                self.submit("preload", partial(self.client.preload, upcoming),
+                            lambda _: None, lambda _error: None)
+                return
+        if self.tab == 2 and not self.help_visible and track_id not in self.lyric_cache:
+            def done(raw):
+                self.lyric_cache[track_id] = lyric_lines(raw)
+                if len(self.lyric_cache) > 8:
+                    del self.lyric_cache[next(iter(self.lyric_cache))]
+
+            self.submit("lyric-preview", partial(self.client.lyrics, track_id), done, lambda _error: done(""))
+
     def advance(self, automatic=False):
-        index = self.player.next_index()
+        index = self.next_index()
         if index is None:
             if not automatic:
                 self.notice("没有下一首")
@@ -607,64 +678,74 @@ class App:
 
     def play_key(self, key):
         player = self.player
-        if self.overlay:
-            self.scene_key(key)
+        if key in ("h", "help"):
+            self.help_visible = not self.help_visible
+        elif self.help_visible:
+            return
+        elif key in VOLUME:
+            self.adjust_volume(VOLUME[key])
         elif self.pending_track:
-            if key in MOVES:
-                player.volume = max(0, min(100, player.volume - 5 * MOVES[key]))
-        elif key == "space":
+            return
+        elif key in ("6", "space"):
             self.toggle_playback()
-        elif key in PREVIOUS:
+        elif key == "5":
             self.previous_track()
-        elif key in NEXT:
+        elif key == "7":
             self.advance()
-        elif key in MOVES:
-            volume = max(0, min(100, player.volume - 5 * MOVES[key]))
-            if player.status in ("idle", "ended", "failed"):
-                player.volume = volume
-            else:
-                self.submit("control", partial(self.client.control, "volume", str(volume)),
-                            lambda _: setattr(player, "volume", volume))
-        elif key == "s":
+        elif key == "4":
             player.mode = (player.mode + 1) % len(MODES)
-        elif key == "l":
-            self.open_lyrics()
-        elif key == "h" and player.current:
+            self.shuffle_next = None
+        elif key == "8" and player.current:
             self.toggle_like(player.current)
-        elif key == "v":
-            self.overlay = Page("场景选择", "scene", SCENES)
         elif key == "enter" and player.current and player.status == "failed":
             self.start_track(player.current, player.upcoming[:])
 
-    def open_lyrics(self):
-        if not self.player.current:
+    def adjust_volume(self, step):
+        player = self.player
+        current = player.volume if self.requested_volume is None else self.requested_volume
+        target = max(0, min(100, current + step))
+        if self.pending_track or player.status in ("idle", "ended", "failed"):
+            player.volume = target
+            self.notice(f"音量 {target}%", seconds=1.8)
+        else:
+            self.requested_volume = target
+            self.apply_volume()
+
+    def apply_volume(self):
+        target = self.requested_volume
+        if target is None or "volume" in self.jobs:
             return
-        self.lyrics_visible = not self.lyrics_visible
-        track_id = self.player.current["id"]
-        if self.lyrics_visible and track_id not in self.lyric_cache:
-            def done(raw):
-                self.lyric_cache[track_id] = lyric_lines(raw)
-
-            self.submit(f"lyric-{track_id}", partial(self.client.lyrics, track_id), done)
-
-    def toggle_like(self, track):
-        liked = not track.get("liked", False)
 
         def done(_result):
+            self.player.volume = target
+            self.notice(f"音量 {target}%", seconds=1.8)
+            if self.requested_volume == target:
+                self.requested_volume = None
+            else:
+                self.apply_volume()
+
+        def failed(error):
+            self.requested_volume = None
+            self.error(error)
+
+        self.submit("volume", partial(self.client.control, "volume", str(target)), done, failed)
+
+    def toggle_like(self, track):
+        if "like" in self.jobs:
+            return
+        liked = not track.get("liked", False)
+        self.like_pending = (track["id"], self.clock())
+
+        def done(_result):
+            self.like_pending = None
             track["liked"] = liked
             self.notice("已收藏" if liked else "已取消收藏")
 
-        self.submit("like", partial(self.client.like, track["id"], liked), done)
+        def failed(error):
+            self.like_pending = None
+            self.error(error)
 
-    def scene_key(self, key):
-        page = self.overlay
-        page.selected = moved(page.selected, key, len(page.items))
-        if key == "enter":
-            label, kind = page.items[page.selected]
-            self.overlay = None
-            self.tab = 1
-            self.library = [Page("歌单", "menu", LIBRARY)]
-            self.open_list(partial(self.collection_page, label, kind), self.library[-1])
+        self.submit("like", partial(self.client.like, track["id"], liked), done, failed)
 
     def queue_key(self, key):
         player = self.player
@@ -758,25 +839,28 @@ class App:
 
     def player_view(self):
         player = self.player
-        if self.overlay:
-            return self.list_view(self.overlay)
+        if self.help_visible:
+            return dict(heading="播放按键", rows=PLAYBACK_HELP, footer="短按 Esc 返回")
         track = self.pending_track or player.current
         title = (track.get("name") or "未知歌曲") if track else "还没有播放歌曲"
-        if track and self.lyrics_visible and not self.pending_track:
-            lyrics = self.lyric_cache.get(player.current["id"])
-            if not lyrics:
-                detail = "正在加载…" if f"lyric-{player.current['id']}" in self.jobs else "暂无歌词"
-                return dict(heading=title, detail=detail, footer="Esc 返回")
-            active = max((i for i, (start, _) in enumerate(lyrics) if start <= player.position), default=0)
-            if all(item[0] == 0 for item in lyrics):
-                active = 0
-            return dict(heading=title, rows=[(line, "") for _, line in lyrics],
-                        selected=active, footer="Esc 返回")
         progress = (0, 0) if self.pending_track else (player.position, player.duration)
         status = "starting" if self.pending_track else player.status
+        info = {"status": status, "mode": MODES[player.mode], "volume": player.volume,
+                "liked": bool(track and track.get("liked")), "artwork": self.artwork}
+        preview = []
+        if self.pending_track:
+            info["loading_frame"] = int(self.clock() * 6) % 8
+        if track:
+            if self.like_pending and self.like_pending[0] == track["id"]:
+                info["like_frame"] = int((self.clock() - self.like_pending[1]) * 6) % 8
+            lyrics = self.lyric_cache.get(track["id"], [])
+            if lyrics and not self.pending_track:
+                cursor = 0
+                if lyrics[-1][0] > 0:
+                    cursor = max((i for i, (start, _) in enumerate(lyrics) if start <= player.position), default=0)
+                preview = [line for _, line in lyrics[cursor:cursor + 2]]
         return dict(heading=title, detail=artists(track) if track else "", progress=progress,
-                    playback={"status": status, "mode": MODES[player.mode], "volume": player.volume,
-                              "liked": bool(track and track.get("liked")), "artwork": self.artwork})
+                    playback=info, lyric_preview=preview)
 
     def queue_view(self):
         player = self.player
@@ -789,8 +873,8 @@ class App:
     def close(self):
         self.close_web()
         self.images.shutdown(wait=False, cancel_futures=True)
-        self.audio.shutdown(wait=True, cancel_futures=True)
         self.client.cancel_pending()
+        self.audio.shutdown(wait=True, cancel_futures=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
         if self.player.current or "play" in self.jobs:
             try:

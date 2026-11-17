@@ -39,6 +39,7 @@ class Netease:
         self._current = self.profile / "current"
         self._player = None
         self._media_urls = OrderedDict()
+        self._media_lock = Lock()
 
     def configured(self) -> bool:
         home = self._current
@@ -203,7 +204,8 @@ class Netease:
                 os.replace(link, self._current)
                 committed = True
                 self._pending_login = (time.monotonic(), qr)
-                self._media_urls.clear()
+                with self._media_lock:
+                    self._media_urls.clear()
                 if self._player is not None:
                     self._player.close()
                     self._player = None
@@ -262,7 +264,8 @@ class Netease:
         with self._lock:
             self._run("logout", allow_empty=True)
             self._pending_login = None
-            self._media_urls.clear()
+            with self._media_lock:
+                self._media_urls.clear()
 
     @staticmethod
     def _record(record):
@@ -330,23 +333,62 @@ class Netease:
     def like(self, song_id, liked):
         self._dynamic("song", "like" if liked else "dislike", f"--songId={song_id}")
 
-    def play(self, track, *, volume=75):
+    def _track_location(self, track):
         if track.get("visible") is False:
             raise NeteaseError("当前歌曲暂不可播放。")
         if not track.get("id") or not track.get("originalId"):
             raise NeteaseError("这首歌缺少官方播放器需要的歌曲 ID。")
-        home = self._current.resolve(strict=True)
-        key = (str(track["id"]), str(track["originalId"]))
-        cached = self._media_urls.pop(key, None)
-        if cached and cached[1] > time.time() * 1000 + 5000:
-            try:
-                self._play_url(home, cached[0], volume)
-            except MpvError:
-                pass
-            else:
-                self._media_urls[key] = cached
-                return
+        return self._current.resolve(strict=True), (str(track["id"]), str(track["originalId"]))
 
+    def _cached_media(self, key):
+        with self._media_lock:
+            cached = self._media_urls.get(key)
+            if cached is None:
+                return None
+            if cached[1] <= time.time() * 1000 + 5000:
+                self._media_urls.pop(key)
+                return None
+            self._media_urls.move_to_end(key)
+            return cached[0]
+
+    def is_preloaded(self, track):
+        key = str(track["id"]), str(track["originalId"])
+        return self._cached_media(key) is not None
+
+    def preload(self, track):
+        home, key = self._track_location(track)
+        if self._cached_media(key) is None:
+            self._fetch_media(home, key)
+
+    def _try_cached_play(self, home, key, volume):
+        url = self._cached_media(key)
+        if url is None:
+            return False
+        try:
+            self._play_url(home, url, volume)
+        except MpvError:
+            with self._media_lock:
+                self._media_urls.pop(key, None)
+            return False
+        return True
+
+    def play_cached(self, track, *, volume=75):
+        home, key = self._track_location(track)
+        return self._try_cached_play(home, key, volume)
+
+    def play(self, track, *, volume=75):
+        home, key = self._track_location(track)
+        if self._try_cached_play(home, key, volume):
+            return
+        url = self._fetch_media(home, key)
+        try:
+            self._play_url(home, url, volume)
+        except MpvError as error:
+            with self._media_lock:
+                self._media_urls.pop(key, None)
+            raise NeteaseError(str(error)) from None
+
+    def _fetch_media(self, home, key):
         with tempfile.TemporaryDirectory(prefix="media-", dir=self._runtime(home)) as staging:
             media_file = Path(staging) / "response.json"
             self._run("play", "--song", "--encrypted-id", key[0], "--original-id", key[1],
@@ -360,15 +402,13 @@ class Netease:
                 raise ValueError
         except ValueError:
             raise NeteaseError("网易云音乐没有返回可用播放地址。") from None
-        try:
-            self._play_url(home, url, volume)
-        except MpvError as error:
-            raise NeteaseError(str(error)) from None
         expiry = payload.get("expiresAt")
         if isinstance(expiry, (int, float)) and expiry > time.time() * 1000 + 5000:
-            self._media_urls[key] = (url, expiry)
-            if len(self._media_urls) > 6:
-                self._media_urls.popitem(last=False)
+            with self._media_lock:
+                self._media_urls[key] = (url, expiry)
+                if len(self._media_urls) > 6:
+                    self._media_urls.popitem(last=False)
+        return url
 
     def _play_url(self, home, url, volume):
         if self._player is None:

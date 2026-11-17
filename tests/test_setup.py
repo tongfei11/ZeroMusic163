@@ -107,6 +107,8 @@ class MediaCacheTest(unittest.TestCase):
             backend._run = resolve
             backend._play_url = lambda _home, url, volume: played.append((url, volume))
             song = {"id": "test", "originalId": "123"}
+            backend.preload(song)
+            self.assertEqual(played, [])
             backend.play(song)
             backend.play(song, volume=55)
             self.assertEqual(len(requests), 1)

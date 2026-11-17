@@ -15,6 +15,7 @@ INPUT_EVENT = struct.Struct("@llHHi")
 KEY_NAMES = {
     1: "esc", 14: "backspace", 15: "tab", 28: "enter", 57: "space",
     96: "enter", 103: "up", 105: "left", 106: "right", 108: "down",
+    114: "volume-down", 115: "volume-up", 138: "help",
 }
 for start, letters in ((2, "1234567890"), (16, "qwertyuiop"), (30, "asdfghjkl"), (44, "zxcvbnm")):
     KEY_NAMES.update({start + offset: char for offset, char in enumerate(letters)})
@@ -191,62 +192,122 @@ def draw_progress(draw, progress, x, y, width):
 
 
 def draw_record(image, draw, artwork):
-    cx, cy = 251, 92
-    draw.ellipse((193, 34, 309, 150), fill="#f2e8ea")
-    draw.ellipse((197, 38, 305, 146), fill="#19181b", outline="#100f10", width=2)
-    for radius in range(31, 53, 3):
+    cx, cy = 260, 81
+    draw.ellipse((214, 35, 306, 127), fill="#f2e8ea")
+    draw.ellipse((217, 38, 303, 124), fill="#19181b", outline="#100f10", width=2)
+    for radius in range(25, 42, 3):
         draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius),
                      outline="#333035")
-    draw.ellipse((222, 63, 280, 121), fill="#a11b2d")
+    draw.ellipse((237, 58, 283, 104), fill="#a11b2d")
     if artwork is not None:
-        circle_image(image, artwork, 223, 64, 57)
+        circle_image(image, artwork, 238, 59, 45)
     else:
-        draw.ellipse((226, 67, 276, 117), fill="#e13248", outline="#ff6878")
-        draw.ellipse((238, 79, 264, 105), outline="#f56e7c")
-        draw.ellipse((248, 89, 254, 95), fill="#fff1f2")
+        draw.ellipse((240, 61, 280, 101), fill="#e13248", outline="#ff6878")
+        draw.ellipse((249, 70, 271, 92), outline="#f56e7c")
+        draw.ellipse((258, 79, 262, 83), fill="#fff1f2")
 
-    draw.ellipse((290, 29, 305, 44), fill="#777079")
-    draw.ellipse((293, 32, 302, 41), fill="#f0e6e9")
-    points = [(297, 37), (293, 51), (286, 58), (279, 63)]
-    draw.line([(x + 1, y + 1) for x, y in points], fill="#40363f", width=5, joint="curve")
-    draw.line(points, fill="#ece1e5", width=3, joint="curve")
-    draw.line((282, 61, 274, 67), fill="#777079", width=6)
-    draw.line((281, 61, 274, 66), fill=WHITE, width=3)
+    draw.ellipse((292, 32, 304, 44), fill="#777079")
+    draw.ellipse((295, 35, 301, 41), fill="#f0e6e9")
+    arm = [(298, 38), (295, 49), (283, 60)]
+    draw.line([(x + 1, y + 1) for x, y in arm], fill="#40363f", width=5, joint="curve")
+    draw.line(arm, fill="#ece1e5", width=3, joint="curve")
+    draw.line((285, 58, 279, 64), fill="#777079", width=5)
+    draw.line((284, 58, 279, 63), fill=WHITE, width=2)
+
+
+def draw_volume(draw, volume, x, y):
+    draw.polygon(((x, y - 3), (x + 4, y - 3), (x + 9, y - 7),
+                  (x + 9, y + 7), (x + 4, y + 3), (x, y + 3)), fill=MUTED)
+    if volume <= 0:
+        draw.line((x + 12, y - 3, x + 17, y + 2), fill=MUTED, width=1)
+        draw.line((x + 12, y + 2, x + 17, y - 3), fill=MUTED, width=1)
+        return
+    for radius in (5, 8, 11)[:(min(volume, 100) - 1) // 33 + 1]:
+        draw.arc((x + 8 - radius, y - radius, x + 8 + radius, y + radius),
+                 start=-48, end=48, fill=MUTED, width=1)
+
+
+def draw_mode(draw, center, y, mode):
+    x = center - 9
+    if mode == "随机":
+        draw.line((x, y - 5, x + 4, y - 5, x + 14, y + 5, x + 18, y + 5), fill=TEXT, width=2)
+        draw.line((x, y + 5, x + 4, y + 5, x + 14, y - 5, x + 18, y - 5), fill=TEXT, width=2)
+    elif mode == "单曲循环":
+        draw.line((x, y - 2, x, y - 6, x + 18, y - 6), fill=TEXT, width=2)
+        draw.line((x, y + 6, x + 18, y + 6, x + 18, y + 2), fill=TEXT, width=2)
+        draw.line((center - 2, y - 1, center, y - 3, center, y + 3), fill=TEXT, width=1)
+        draw.polygon(((x + 3, y + 2), (x - 2, y + 6), (x + 3, y + 10)), fill=TEXT)
+        draw.polygon(((x + 15, y - 10), (x + 20, y - 6), (x + 15, y - 2)), fill=TEXT)
+        return
+    else:
+        for dy in (-5, 5):
+            draw.line((x, y + dy, x + 18, y + dy), fill=TEXT, width=2)
+    for dy in (-5, 5):
+        draw.polygon(((x + 15, y + dy - 3), (x + 20, y + dy), (x + 15, y + dy + 3)), fill=TEXT)
+
+
+def draw_skip(draw, x, y, direction, color):
+    points = ((x - 4 * direction, y - 7), (x + 4 * direction, y), (x - 4 * direction, y + 7))
+    draw.polygon(points, fill=color)
+    bar = x + 6 * direction
+    draw.line((bar, y - 7, bar, y + 7), fill=color, width=2)
+
+
+def draw_favorite(draw, x, y, liked):
+    # The two lobes and lower point share their edges in the filled state.
+    if liked:
+        draw.ellipse((x - 9, y - 7, x, y + 3), fill=ACCENT)
+        draw.ellipse((x, y - 7, x + 9, y + 3), fill=ACCENT)
+        draw.polygon(((x - 8, y), (x + 8, y), (x, y + 8)), fill=ACCENT)
+    else:
+        draw.arc((x - 9, y - 7, x, y + 3), start=155, end=360, fill=ACCENT, width=2)
+        draw.arc((x, y - 7, x + 9, y + 3), start=180, end=25, fill=ACCENT, width=2)
+        draw.line((x - 9, y, x, y + 8, x + 9, y), fill=ACCENT, width=2, joint="curve")
+
+
+def draw_transport(draw, playback):
+    mode, previous, toggle, following, favorite = (52, 109, 165, 220, 274)
+    y = 153
+    status = playback.get("status")
+    loading = status == "starting"
+    disabled = status in ("idle", "starting")
+    draw.rectangle((0, 136, 319, 169), fill=WHITE)
+    draw.line((0, 136, 319, 136), fill=SURFACE)
+    draw_mode(draw, mode, y, playback.get("mode"))
+    draw_skip(draw, previous, y, -1, MUTED if disabled else TEXT)
+    draw_skip(draw, following, y, 1, MUTED if disabled else TEXT)
+    button_color = SURFACE if loading else "#9b8b91" if status == "idle" else ACCENT
+    draw.ellipse((toggle - 13, y - 13, toggle + 13, y + 13), fill=button_color)
+    if status == "playing":
+        draw.rounded_rectangle((toggle - 5, y - 6, toggle - 2, y + 6), radius=1, fill=WHITE)
+        draw.rounded_rectangle((toggle + 2, y - 6, toggle + 5, y + 6), radius=1, fill=WHITE)
+    elif loading:
+        draw_loading(draw, toggle, y, playback.get("loading_frame", 0))
+    else:
+        draw.polygon(((toggle - 3, y - 6), (toggle - 3, y + 6), (toggle + 6, y)), fill=WHITE)
+    like_frame = playback.get("like_frame")
+    if like_frame is not None:
+        draw_loading(draw, favorite, y, like_frame)
+    else:
+        draw_favorite(draw, favorite, y, playback.get("liked"))
 
 
 def draw_playback(image, draw, view):
     playback = view["playback"]
-    status = playback.get("status")
-    playing = status == "playing"
-    states = {"idle": "待播放", "playing": "播放中", "paused": "已暂停", "starting": "载入中",
-              "ended": "已播完", "failed": "播放失败"}
-    state = states.get(status, "")
-    mode = playback.get("mode") or ""
-    stats = " · ".join(part for part in (state, mode, f"音量 {playback.get('volume', 0)}") if part)
-    line(draw, view.get("heading"), 10, 34, 180, 17)
-    line(draw, view.get("detail"), 10, 56, 180, 12, MUTED)
-    draw_progress(draw, view.get("progress"), 10, 78, 176)
-    line(draw, stats, 10, 101, 177, 11, ACCENT if status == "failed" else MUTED)
-    disabled = status in ("idle", "starting")
-    draw.ellipse((73, 111, 101, 139), fill="#a19396" if disabled else ACCENT)
-    if playing:
-        draw.rounded_rectangle((82, 118, 85, 132), radius=1, fill=WHITE)
-        draw.rounded_rectangle((89, 118, 92, 132), radius=1, fill=WHITE)
-    elif status == "starting":
-        for x in (82, 87, 92):
-            draw.ellipse((x - 1, 124, x + 1, 126), fill=WHITE)
-    else:
-        draw.polygon(((84, 117), (84, 133), (95, 125)), fill=WHITE)
-    line(draw, "Z 上一首", 10, 121, 60, 11, MUTED if disabled else TEXT)
-    line(draw, "C 下一首", 125, 121, 62, 11, MUTED if disabled else TEXT)
-    actions = {"idle": "等待选歌", "playing": "空格 暂停", "starting": "正在载入", "failed": "Enter 重试"}
-    line(draw, actions.get(status, "空格 播放"), 65, 140, 65, 10, MUTED if disabled else ACCENT)
-
+    line(draw, view.get("heading"), 10, 35, 193, 17)
+    line(draw, view.get("detail"), 10, 56, 163, 12, MUTED)
+    draw_volume(draw, playback.get("volume", 0), 183, 60)
+    draw_progress(draw, view.get("progress"), 10, 74, 191)
+    for index, lyric in enumerate((view.get("lyric_preview") or [])[:2]):
+        line(draw, lyric, 10, 93 + index * 13, 193, 11, ACCENT if index == 0 else MUTED)
     draw_record(image, draw, playback.get("artwork"))
-    if playback.get("liked"):
-        draw.ellipse((300, 133, 309, 142), fill=ACCENT)
-        draw.ellipse((307, 133, 316, 142), fill=ACCENT)
-        draw.polygon(((301, 140), (315, 140), (308, 148)), fill=ACCENT)
+    notice = view.get("notice")
+    if not notice and playback.get("status") == "failed":
+        notice = "播放失败"
+    if notice:
+        draw.rounded_rectangle((6, 118, 204, 134), radius=4, fill=SURFACE)
+        line(draw, notice, 10, 121, 190, 11, ACCENT)
+    draw_transport(draw, playback)
 
 
 def render(view):
@@ -258,15 +319,12 @@ def render(view):
         draw_tabs(draw, tab)
         y = 34
 
-    if view.get("playback") or view.get("profile_name"):
-        playback = view.get("playback")
-        if playback:
-            draw_playback(image, draw, view)
-            footer = "F/X 音量 · S 模式 · L 歌词 · H 收藏 · V 场景"
-        else:
-            draw_profile(image, draw, view)
-            footer = view.get("footer")
-        draw_footer(draw, footer, view.get("notice"))
+    if view.get("playback"):
+        draw_playback(image, draw, view)
+        return image
+    if view.get("profile_name"):
+        draw_profile(image, draw, view)
+        draw_footer(draw, view.get("footer"), view.get("notice"))
         return image
 
     detail = view.get("detail")
