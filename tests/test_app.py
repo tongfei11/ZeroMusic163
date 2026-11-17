@@ -305,6 +305,71 @@ class AppTest(unittest.TestCase):
         self.assertEqual(len(page.items), PLAYLIST_PAGE_SIZE + 1)
         self.assertEqual(self.app.view()["rows"][0][0], "播放全部")
 
+    def test_only_last_confirmed_library_request_opens(self):
+        started, released = Event(), Event()
+        self.addCleanup(released.set)
+        requested = []
+        original = self.client.library
+
+        def blocked(kind):
+            requested.append(kind)
+            if kind == "favorite":
+                started.set()
+                released.wait(2)
+            return original(kind)
+
+        self.client.library = blocked
+        self.key("tab")
+        self.key("enter")
+        self.assertTrue(started.wait(2))
+        self.key("x")
+        self.key("enter")
+        self.key("x")
+        self.key("enter")
+        self.assertEqual(self.app.view()["loading_row"], 2)
+        self.assertEqual(requested, ["favorite"])
+        released.set()
+        self.wait("library")
+        self.assertEqual(len(self.app.library), 1)
+        self.wait("library")
+        self.assertEqual(requested, ["favorite", "daily"])
+        self.assertEqual(self.app.library[-1].title, "每日推荐")
+
+    def test_daily_recommendations_can_be_queued_together(self):
+        self.client.library = lambda _kind: [
+            song("第一首", "first"), dict(song("灰歌", "blocked"), playFlag=False), song("第三首", "third")
+        ]
+        for key in ("tab", "x", "x", "a"):
+            self.key(key)
+        self.wait("library")
+        self.key("tab")
+        self.key("tab")
+        self.assertEqual([title for title, _ in self.app.view()["rows"]], ["第一首", "第三首"])
+        self.assertEqual(self.client.plays, [])
+
+    def test_favorite_queue_can_request_a_later_page(self):
+        offsets = []
+
+        def paged(_collection, offset=0):
+            offsets.append(offset)
+            end = PLAYLIST_PAGE_SIZE if not offset else offset + 2
+            return [song(f"第 {index + 1} 首", str(index)) for index in range(offset, end)]
+
+        self.client.tracks = paged
+        self.key("tab")
+        self.key("a")
+        self.wait("library")
+        self.key("tab")
+        self.key("tab")
+        self.assertEqual(offsets, [0])
+        self.assertEqual(self.app.view()["rows"][0][0], "第 1 首")
+        self.key("c")
+        self.wait("queue-page")
+        self.assertEqual(offsets, [0, PLAYLIST_PAGE_SIZE])
+        self.assertEqual(self.app.view()["rows"][0][0], "第 31 首")
+        self.key("z")
+        self.assertEqual(self.app.view()["rows"][0][0], "第 1 首")
+
     def test_failed_entry_does_not_override_next_selection(self):
         initial = self.client.library
 

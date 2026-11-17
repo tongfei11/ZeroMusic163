@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from random import randrange
 import re
 
 
@@ -45,9 +44,20 @@ def lyric_lines(text):
 
 
 @dataclass
+class PlaylistTail:
+    title: str
+    playlist_id: str
+    offset: int
+    previous_ids: tuple
+    liked: bool = False
+    fetched: list | None = None
+    retry_at: float = 0
+
+
+@dataclass
 class Player:
     current: dict | None = None
-    upcoming: list[dict] = field(default_factory=list)
+    upcoming: list[dict | PlaylistTail] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
     position: float = 0
     duration: float = 0
@@ -88,12 +98,6 @@ class Player:
                 return True
             self.status = "failed"
         return False
-
-    def next_index(self):
-        if not self.upcoming:
-            return None
-        return randrange(len(self.upcoming)) if self.mode == 1 else 0
-
 
 def number(value):
     return max(0.0, float(value)) if isinstance(value, (int, float)) else 0.0

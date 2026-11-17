@@ -5,13 +5,14 @@ from dataclasses import dataclass, field
 from functools import partial
 import json
 from pathlib import Path
+from random import sample
 from tempfile import NamedTemporaryFile
 from time import monotonic
 
 from artwork import download_thumbnail
 
 from netease import NeteaseError, PLAYLIST_PAGE_SIZE
-from player import MODES, Player, artists, lyric_lines, playable, track_rows
+from player import MODES, Player, PlaylistTail, artists, lyric_lines, playable, track_rows
 from setup_web import SetupWeb
 
 
@@ -21,6 +22,7 @@ SETTINGS = [("隐藏不可播放曲目", "hide-unplayable"), ("修改网页配�
             ("重新登录", "login"), ("退出登录", "logout")]
 MOVES = {"f": -1, "up": -1, "x": 1, "down": 1}
 VOLUME = {"s": -5, "volume-down": -5, "d": 5, "volume-up": 5}
+PRELOAD_TRACKS = 3
 PLAYBACK_HELP = [
     ("4 模式 · 5 上一首 · 6 播放 / 暂停", ""),
     ("7 下一首 · 8 收藏 / 取消收藏", ""),
@@ -64,6 +66,7 @@ class App:
                 pass
         self.jobs = {}
         self.library_loading = None
+        self.library_request = None
         self.running = True
         self.screen = "checking"
         self.return_screen = "ready"
@@ -81,14 +84,17 @@ class App:
         self.profile_at = None
         self.artwork_url, self.artwork = "", None
         self.pending_track = None
+        self.pending_queue = None
         self.player = Player()
         self.track_started_at = 0
         self.queue_selection = 0
+        self.queue_flip = None
+        self.queue_advance = None
         self.lyric_cache = {}
         self.like_pending = None
         self.requested_volume = None
-        self.preload_attempt = None
-        self.shuffle_next = None
+        self.preload_attempt = set()
+        self.shuffle_next = []
         self.last_key_at = self.clock()
         self.next_poll = 0
         self.notice_text, self.notice_until = "", 0
@@ -113,8 +119,6 @@ class App:
         completed = [(key, job) for key, job in self.jobs.items() if job[0].done()]
         for key, (future, success, failure) in completed:
             del self.jobs[key]
-            if key == "library":
-                self.library_loading = None
             try:
                 result = future.result()
             except NeteaseError as error:
@@ -124,6 +128,9 @@ class App:
                     self.error(error)
             else:
                 success(result)
+        self.run_library_request()
+        if self.screen == "ready":
+            self.maintain_queue()
 
         if self.screen == "setup" and self.web and self.web.saved.is_set():
             self.close_web()
@@ -205,8 +212,8 @@ class App:
         self.profile_at = None
         self.artwork_url, self.artwork = "", None
         self.lyric_cache.clear()
-        self.preload_attempt = None
-        self.shuffle_next = None
+        self.preload_attempt.clear()
+        self.shuffle_next.clear()
 
     def show_artwork(self, track):
         album = track.get("album")
@@ -338,8 +345,10 @@ class App:
                 self.search.generation += 1
                 self.search.editing = True
                 self.notice("")
-            elif self.tab == 1 and len(self.library) > 1:
-                self.library.pop()
+            elif self.tab == 1:
+                self.library_request = self.library_loading = None
+                if len(self.library) > 1:
+                    self.library.pop()
             elif self.tab == 2:
                 self.help_visible = False
 
@@ -394,8 +403,8 @@ class App:
             if page.has_more and page.selected == rows and key == "enter":
                 self.load_more_tracks(page)
             elif tracks:
-                if page.selected == 0 and key == "enter":
-                    self.play_all(tracks)
+                if page.selected == 0 and key in ("enter", "a"):
+                    self.use_collection(page, play=key == "enter")
                 elif 0 < page.selected < rows:
                     self.track_key(key, tracks[page.selected - 1])
             return
@@ -404,14 +413,20 @@ class App:
         page.selected = moved(page.selected, key, len(page.items))
         if key == "space":
             self.toggle_playback()
-        if key != "enter":
+        if key not in ("enter", "a"):
             return
         item = page.items[page.selected]
         if page.kind == "playlists":
-            self.open_list(partial(self.playlist_page, item.get("name") or "歌单", item["id"]), page)
+            fetch = partial(self.playlist_page, item.get("name") or "歌单", item["id"])
+            self.open_list(fetch, page, enqueue=key == "a")
         else:
             label, action = item
+            if key == "a":
+                if action in ("favorite", "daily"):
+                    self.open_list(partial(self.collection_page, label, action), page, enqueue=True)
+                return
             if action == "settings":
+                self.library_request = self.library_loading = None
                 self.library.append(Page("设置", "settings", SETTINGS))
             elif action == "hide-unplayable":
                 self.toggle_hidden_tracks()
@@ -441,28 +456,44 @@ class App:
         return Page(title, "tracks", items, playlist_id=playlist_id,
                     has_more=len(items) == PLAYLIST_PAGE_SIZE, liked=liked)
 
-    def submit_library(self, page, fetch, done, failed):
-        if "library" in self.jobs:
+    def submit_library(self, page, fetch, done, failed, *, intent="enter"):
+        if self.library_request and self.library_request[:3] == (id(page), page.selected, intent):
             return
+        self.library_request = (id(page), page.selected, intent, fetch, done, failed)
         self.library_loading = (page, page.selected, self.clock())
-        self.submit("library", fetch, done, failed)
+        self.run_library_request()
 
-    def open_list(self, fetch, parent):
-        selected = parent.selected
+    def run_library_request(self):
+        request = self.library_request
+        if request is None or "library" in self.jobs:
+            return
+        _, _, _, fetch, done, failed = request
 
+        def finish(callback, result):
+            if self.library_request is request:
+                self.library_request = self.library_loading = None
+                if self.screen == "ready":
+                    callback(result)
+
+        self.submit("library", fetch, partial(finish, done), partial(finish, failed))
+
+    def open_list(self, fetch, parent, *, enqueue=False):
         def still_selected():
-            return self.library[-1] is parent and parent.selected == selected
+            return self.library[-1] is parent
 
         def done(page):
             if still_selected():
-                self.library.append(page)
-                self.notice("")
+                if enqueue:
+                    self.use_collection(page)
+                else:
+                    self.library.append(page)
+                    self.notice("")
 
         def failed(error):
             if still_selected():
                 self.error(error)
 
-        self.submit_library(parent, fetch, done, failed)
+        self.submit_library(parent, fetch, done, failed, intent="a" if enqueue else "enter")
 
     def load_more_tracks(self, page):
         offset = len(page.items)
@@ -523,12 +554,31 @@ class App:
             self.player.upcoming.append(track)
             self.notice("已加入队列")
 
-    def play_all(self, tracks):
-        playable_tracks = [track for track in tracks if playable(track)]
-        if not playable_tracks:
+    def use_collection(self, page, *, play=False):
+        entries = [track for track in page.items if playable(track)]
+        if page.has_more:
+            ids = tuple(track.get("id") for track in page.items[-PLAYLIST_PAGE_SIZE:])
+            entries.append(PlaylistTail(page.title, page.playlist_id, len(page.items), ids, page.liked))
+        if not entries:
             self.notice("没有可播放的歌曲")
             return
-        action = partial(self.start_track, playable_tracks[0], playable_tracks[1:], switch=True)
+        if not play:
+            self.player.upcoming.extend(entries)
+            if self.pending_queue is not None:
+                self.pending_queue.extend(entries)
+            self.notice("已整单加入队列")
+            return
+
+        def action():
+            if "play" in self.jobs:
+                return
+            first, *remaining = entries
+            if isinstance(first, PlaylistTail):
+                self.player.upcoming = entries
+                self.advance(switch=True)
+            else:
+                self.start_track(first, remaining, switch=True)
+
         if self.player.upcoming:
             self.confirmation = ["替换当前队列？", action, 0]
         else:
@@ -540,8 +590,10 @@ class App:
             return
         if "logout" in self.jobs or "play" in self.jobs:
             return
+        self.queue_advance = self.queue_flip = None
         volume = self.player.volume
         self.pending_track = track
+        self.pending_queue = remaining
         self.help_visible = False
         self.show_artwork(track)
         if switch:
@@ -549,20 +601,21 @@ class App:
 
         def done(_result):
             self.pending_track = None
+            self.pending_queue = None
             if previous:
                 self.player.history.pop()
             self.player.jump(track, remaining, remember=not previous)
             self.player.status = "playing"
             self.track_started_at, self.next_poll = self.clock(), 0
             self.queue_selection = 0
-            self.preload_attempt = None
-            self.shuffle_next = None
+            self.preload_attempt.clear()
             self.notice("")
             if self.player.volume != volume:
                 self.submit("control", partial(self.client.control, "volume", str(self.player.volume)), lambda _: None)
 
         def failed(error):
             self.pending_track = None
+            self.pending_queue = None
             if self.player.current:
                 self.show_artwork(self.player.current)
             else:
@@ -610,16 +663,69 @@ class App:
             self.player.status = "failed"
             self.error(error)
 
-    def next_index(self):
+    def queue_boundary(self):
         upcoming = self.player.upcoming
-        if not upcoming:
-            return None
+        for index, entry in enumerate(upcoming):
+            if isinstance(entry, PlaylistTail):
+                return index, entry
+        return len(upcoming), None
+
+    def next_indices(self):
+        count, _ = self.queue_boundary()
         if self.player.mode != 1:
-            return 0
-        queue = tuple(track.get("id") for track in upcoming)
-        if self.shuffle_next is None or self.shuffle_next[0] != queue:
-            self.shuffle_next = queue, self.player.next_index()
-        return self.shuffle_next[1]
+            return range(min(count, PRELOAD_TRACKS))
+        upcoming = self.player.upcoming
+        indices = {id(upcoming[index]): index for index in range(count)}
+        self.shuffle_next = [key for key in self.shuffle_next if key in indices]
+        candidates = [key for key in indices if key not in self.shuffle_next]
+        self.shuffle_next.extend(sample(candidates, min(PRELOAD_TRACKS - len(self.shuffle_next), len(candidates))))
+        return [indices[key] for key in self.shuffle_next]
+
+    def maintain_queue(self):
+        if "play" in self.jobs:
+            return
+        upcoming = self.player.upcoming
+        index, source = self.queue_boundary()
+        if source is not None and source.fetched is not None:
+            items, source.fetched = source.fetched, None
+            ids = tuple(track.get("id") for track in items)
+            tracks = []
+            if ids != source.previous_ids:
+                tracks = [dict(track, liked=True) if source.liked else track for track in items if playable(track)]
+            has_more = len(items) == PLAYLIST_PAGE_SIZE and ids != source.previous_ids
+            source.offset += len(items)
+            source.previous_ids = ids
+            upcoming[index:index + 1] = tracks + ([source] if has_more else [])
+            index, source = self.queue_boundary()
+        if self.queue_flip is not None:
+            target = self.queue_flip
+            size = index + int(self.player.current is not None)
+            if target < size or source is None:
+                self.queue_selection = max(0, min(target, size - 1))
+                self.queue_flip = None
+                self.notice("")
+        if self.queue_advance is not None and (index or source is None):
+            automatic, switch = self.queue_advance
+            self.queue_advance = None
+            self.advance(automatic=automatic, switch=switch)
+            return
+        if source is None or self.clock() < source.retry_at:
+            return
+        if index <= PRELOAD_TRACKS or self.queue_flip is not None:
+            if any(key not in ("position", "control", "volume") and not key.startswith(("cover-", "avatar-"))
+                   for key in self.jobs):
+                return
+
+            def failed(error):
+                source.retry_at = self.clock() + 15
+                if self.queue_advance is not None or self.queue_flip is not None:
+                    if self.queue_advance and not self.queue_advance[0]:
+                        self.queue_advance = None
+                    self.queue_flip = None
+                    self.error(error)
+
+            self.submit("queue-page", partial(self.client.tracks, source.playlist_id, source.offset),
+                        lambda items: setattr(source, "fetched", items), failed)
 
     def load_playback_extras(self):
         player = self.player
@@ -629,12 +735,11 @@ class App:
                for key in self.jobs):
             return
         track_id = player.current["id"]
-        index = self.next_index() if player.mode != 2 else None
-        if index is not None:
+        indices = self.next_indices() if player.mode != 2 else ()
+        for index in indices:
             upcoming = player.upcoming[index]
-            plan = (track_id, upcoming["id"])
-            if self.preload_attempt != plan:
-                self.preload_attempt = plan
+            if upcoming["id"] not in self.preload_attempt and not self.client.is_preloaded(upcoming):
+                self.preload_attempt.add(upcoming["id"])
                 self.submit("preload", partial(self.client.preload, upcoming),
                             lambda _: None, lambda _error: None)
                 return
@@ -646,15 +751,23 @@ class App:
 
             self.submit("lyric-preview", partial(self.client.lyrics, track_id), done, lambda _error: done(""))
 
-    def advance(self, automatic=False):
-        index = self.next_index()
+    def advance(self, automatic=False, *, switch=False):
+        index = next(iter(self.next_indices()), None)
         if index is None:
+            _, source = self.queue_boundary()
+            if source is not None:
+                if not automatic:
+                    source.retry_at = 0
+                self.queue_advance = automatic, switch
+                self.notice("正在加载后续曲目…", seconds=20)
+                self.maintain_queue()
+                return
             if not automatic:
                 self.notice("没有下一首")
             return
         remaining = self.player.upcoming[:]
         track = remaining.pop(index)
-        self.start_track(track, remaining, automatic=automatic)
+        self.start_track(track, remaining, automatic=automatic, switch=switch)
 
     def previous_track(self):
         if not self.player.history:
@@ -695,7 +808,7 @@ class App:
             self.advance()
         elif key == "4":
             player.mode = (player.mode + 1) % len(MODES)
-            self.shuffle_next = None
+            self.shuffle_next.clear()
         elif key == "8" and player.current:
             self.toggle_like(player.current)
         elif key == "enter" and player.current and player.status == "failed":
@@ -751,7 +864,22 @@ class App:
     def queue_key(self, key):
         player = self.player
         offset = int(bool(player.current))
-        size = offset + len(player.upcoming)
+        boundary, source = self.queue_boundary()
+        size = offset + boundary + int(source is not None)
+        page_start = self.queue_selection // PLAYLIST_PAGE_SIZE * PLAYLIST_PAGE_SIZE
+        if key == "z":
+            self.queue_flip = None
+            self.queue_selection = max(0, page_start - PLAYLIST_PAGE_SIZE)
+            return
+        if key == "c":
+            target = page_start + PLAYLIST_PAGE_SIZE
+            if source is not None and target >= offset + boundary:
+                self.request_queue_page(source, target)
+            elif target < size:
+                self.queue_selection = target
+            return
+        if key in MOVES:
+            self.queue_flip = None
         self.queue_selection = moved(self.queue_selection, key, size)
         if key == "space":
             self.toggle_playback()
@@ -760,11 +888,21 @@ class App:
             return
         if key == "r":
             player.upcoming.pop(index)
+            self.queue_flip = None
             self.queue_selection = max(0, min(size - 2, self.queue_selection))
         elif key == "enter":
+            if source is not None and index == boundary:
+                self.request_queue_page(source, self.queue_selection)
+                return
             remaining = player.upcoming[:]
             track = remaining.pop(index)
             self.start_track(track, remaining, switch=True)
+
+    def request_queue_page(self, source, target):
+        source.retry_at = 0
+        self.queue_flip = target
+        self.notice("正在加载后续曲目…", seconds=20)
+        self.maintain_queue()
 
     def view(self):
         notice = self.notice_text if self.clock() < self.notice_until else ""
@@ -816,9 +954,8 @@ class App:
 
     def list_view(self, page):
         if page.kind == "tracks":
-            play_label = "播放已加载曲目" if page.has_more else "播放全部"
             tracks = self.visible_tracks(page.items)
-            rows = [(play_label, "")] + track_rows(tracks) if tracks else []
+            rows = [("播放全部", "A 整单入队")] + track_rows(tracks) if tracks else []
             if page.has_more:
                 rows.append(("加载更多", ""))
             detail = "" if tracks else "没有可播放的歌曲" if page.items else "暂无歌曲"
@@ -829,8 +966,9 @@ class App:
             rows = [(label, ("开启" if self.hide_unplayable else "关闭") if action == "hide-unplayable" else "")
                     for label, action in page.items]
             detail = self.account if page.kind == "settings" else ""
-        view = dict(heading=page.title, detail=detail, rows=rows, selected=page.selected,
-                    footer="F/X 选择 · Enter 打开 · Esc 返回")
+        footer = "Enter 打开 · A 入队 · Esc 返回" if page.kind in ("menu", "playlists") else \
+            "Enter 播放 · A 入队 · Esc 返回" if page.kind == "tracks" else "F/X 选择 · Enter 打开 · Esc 返回"
+        view = dict(heading=page.title, detail=detail, rows=rows, selected=page.selected, footer=footer)
         if page.kind == "menu":
             view.update(profile_name=self.account or "已登录", avatar=self.avatar)
         if self.library_loading and self.library_loading[0] is page:
@@ -865,11 +1003,20 @@ class App:
 
     def queue_view(self):
         player = self.player
-        rows = track_rows(([player.current] if player.current else []) + player.upcoming)
-        if player.current:
+        boundary, source = self.queue_boundary()
+        entries = ([player.current] if player.current else []) + player.upcoming[:boundary]
+        size = len(entries) + int(source is not None)
+        selected = moved(self.queue_selection, "", size)
+        start = selected // PLAYLIST_PAGE_SIZE * PLAYLIST_PAGE_SIZE
+        stop = start + PLAYLIST_PAGE_SIZE
+        rows = track_rows(entries[start:stop])
+        if source is not None and start <= len(entries) < stop:
+            rows.append((source.title, "正在加载…" if "queue-page" in self.jobs else "Enter 加载后续曲目"))
+        if player.current and start == 0:
             rows[0] = (rows[0][0], "当前曲目 · " + rows[0][1])
-        return dict(heading="播放队列", detail="" if rows else "队列为空", rows=rows,
-                    selected=self.queue_selection, footer="F/X 选择 · Enter 播放 · R 移除")
+        detail = f"第 {start // PLAYLIST_PAGE_SIZE + 1} 页" if rows else "队列为空"
+        return dict(heading="播放队列", detail=detail, rows=rows, selected=selected - start,
+                    footer="Z/C 翻页 · Enter 播放 · R 移除")
 
     def close(self):
         self.close_web()
