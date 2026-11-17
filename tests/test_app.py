@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 import unittest
+from unittest.mock import patch
 
 from app import App
 from player import Player, lyric_lines
@@ -67,6 +68,9 @@ class FakeClient:
 
 class AppTest(unittest.TestCase):
     def setUp(self):
+        pressure = patch("app.memory_available", return_value=True)
+        pressure.start()
+        self.addCleanup(pressure.stop)
         self.time = 0
         self.client = FakeClient()
         self.app = App(self.client, clock=lambda: self.time)
@@ -116,6 +120,7 @@ class AppTest(unittest.TestCase):
     def test_random_mode_prefetches_the_same_track_next_uses(self):
         first = song()
         self.app.player.current = first
+        self.app.lyric_cache[first["id"]] = []
         self.app.player.upcoming = [song("晴天", "two"), song("稻香", "three")]
         self.app.player.status = "playing"
         self.key("tab")
@@ -145,6 +150,21 @@ class AppTest(unittest.TestCase):
         self.app.tick()
         self.assertEqual(downloads, ["next"])
         self.assertNotIn("prefetch-audio", self.app.jobs)
+
+    def test_current_lyrics_load_while_next_audio_is_downloading(self):
+        self.app.player.current = song()
+        self.app.player.status = "playing"
+        self.app.tab = 2
+        release = Event()
+        self.addCleanup(release.set)
+        self.app.submit("prefetch-audio", lambda: release.wait(2), lambda _: None, download=True)
+        self.client.lyrics = lambda _: "[00:00]第一行"
+        self.time = 3
+        self.app.tick()
+        self.wait("lyric-preview")
+        self.assertEqual(self.app.view()["lyric_preview"], ["第一行"])
+        self.assertIn("prefetch-audio", self.app.jobs)
+        release.set()
 
     def test_cached_next_does_not_wait_for_lyrics_cli(self):
         self.app.player.current = song()

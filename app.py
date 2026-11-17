@@ -828,6 +828,15 @@ class App:
                for key in self.jobs):
             return
         track_id = player.current["id"]
+        if not self.background and self.tab == 2 and not self.help_visible and track_id not in self.lyric_cache:
+            def done(raw):
+                self.lyric_cache[track_id] = lyric_lines(raw)
+                if len(self.lyric_cache) > 8:
+                    del self.lyric_cache[next(iter(self.lyric_cache))]
+
+            self.submit("lyric-preview", partial(self.client.lyrics, track_id), done,
+                        lambda _error: self.lyric_cache.__setitem__(track_id, None))
+            return
         if self.clock() - self.track_started_at < 12:
             return
         if "prefetch-audio" in self.jobs or not memory_available(72):
@@ -849,14 +858,6 @@ class App:
                 self.submit("preload", partial(self.client.preload, upcoming),
                             lambda _: None, lambda _error: None)
                 return
-        if not self.background and self.tab == 2 and not self.help_visible and track_id not in self.lyric_cache:
-            def done(raw):
-                self.lyric_cache[track_id] = lyric_lines(raw)
-                if len(self.lyric_cache) > 8:
-                    del self.lyric_cache[next(iter(self.lyric_cache))]
-
-            self.submit("lyric-preview", partial(self.client.lyrics, track_id), done, lambda _error: done(""))
-
     def advance(self, automatic=False, *, switch=False):
         index = next(iter(self.next_indices()), None)
         if index is None:
@@ -1109,6 +1110,11 @@ class App:
                 if lyrics[-1][0] > 0:
                     cursor = max((i for i, (start, _) in enumerate(lyrics) if start <= player.position), default=0)
                 preview = [line for _, line in lyrics[cursor:cursor + 2]]
+            elif not self.pending_track and player.status in ("playing", "paused"):
+                if track["id"] not in self.lyric_cache:
+                    preview = ["歌词加载中…"]
+                else:
+                    preview = ["歌词加载失败" if lyrics is None else "暂无歌词"]
         return dict(heading=title, detail=artists(track) if track else "", progress=progress,
                     playback=info, lyric_preview=preview, title_scroll=self.clock() - self.title_started_at)
 
