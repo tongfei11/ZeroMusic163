@@ -5,6 +5,10 @@ const path = require('node:path');
 const readline = require('node:readline');
 
 const entry = fs.realpathSync(process.argv[2]);
+const fetch = global.fetch;
+global.fetch = (resource, options = {}) => fetch(resource, {
+  ...options, signal: options.signal || AbortSignal.timeout(8000),
+});
 const source = fs.readFileSync(entry, 'utf8');
 const marker = 'let c=process[';
 const offset = source.lastIndexOf(marker);

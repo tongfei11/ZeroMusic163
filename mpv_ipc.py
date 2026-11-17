@@ -72,6 +72,7 @@ class Mpv:
                 self.process = subprocess.Popen(
                     ["mpv", "--no-config", "--idle=yes", "--no-video", "--really-quiet",
                      "--audio-client-name=ZeroMusic163", "--pipewire-buffer=120",
+                     "--network-timeout=8",
                      "--force-window=no", f"--input-ipc-server={self.address}"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True,
@@ -147,11 +148,11 @@ class Mpv:
         return False
 
     def state(self):
-        state = self.properties("idle-active", "pause", "time-pos", "duration", "volume")
+        state = self.properties("idle-active", "pause", "time-pos", "duration", "volume", "paused-for-cache")
         if state["idle-active"] is True:
             status = "stopped"
         elif state["idle-active"] is False and state["pause"] is not None:
-            status = "paused" if state["pause"] else "playing"
+            status = "paused" if state["pause"] else "buffering" if state.get("paused-for-cache") else "playing"
         else:
             status = "unknown"
         return {"status": status, "position": state["time-pos"], "duration": state["duration"],

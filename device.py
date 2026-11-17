@@ -54,6 +54,15 @@ class Device:
                 raise OSError("LCD write made no progress")
             pending = pending[written:]
 
+    def show_row_title(self, view, offset):
+        title, x, y, width = selected_row_title(view)
+        stride, strip = row_title_pixels(title, width)
+        for row in range(18):
+            start = ((y + row) * SIZE[0] + x) * 2
+            source = row * stride + offset * 2
+            self.pixels[start:start + width * 2] = strip[source:source + width * 2]
+        self.write_frame()
+
     def events(self, timeout):
         if not self.poll.select(timeout):
             return []
@@ -137,6 +146,10 @@ def title_overflow(title):
 
 def title_scroll_frame(title, elapsed):
     overflow = title_overflow(title)
+    return scroll_frame(overflow, elapsed)
+
+
+def scroll_frame(overflow, elapsed):
     if not overflow:
         return 0, 0.12
     travel = overflow / TITLE_SCROLL_SPEED
@@ -146,6 +159,49 @@ def title_scroll_frame(title, elapsed):
     if phase >= TITLE_SCROLL_PAUSE + travel:
         return overflow, min(0.12, travel + 2 * TITLE_SCROLL_PAUSE - phase)
     return int((phase - TITLE_SCROLL_PAUSE) * TITLE_SCROLL_SPEED), TITLE_SCROLL_FRAME
+
+
+def selected_row_title(view):
+    rows = view.get("rows") or []
+    selected = view.get("selected")
+    if view.get("profile_name") or view.get("qr") or view.get("playback") or selected is None:
+        return None
+    if not 0 <= selected < len(rows):
+        return None
+    top = 58 + (16 if view.get("detail") else 0) if view.get("tab") is not None else 36
+    height = 23 if view.get("tab") is not None else 47
+    bottom = 130 if view.get("notice") else FOOTER_TOP - 2
+    if view.get("progress"):
+        bottom -= 23
+    count = max(1, (bottom - top + 1) // height)
+    start = min(max(0, selected - count + 1), max(0, len(rows) - count))
+    title, subtitle = rows[selected]
+    loading = selected == view.get("loading_row")
+    stacked = view.get("tab") is None or view.get("progress")
+    width = (282 if loading else 297) if stacked or not subtitle else 176
+    return str(title), 11, top + (selected - start) * height + 4, width
+
+
+@lru_cache(maxsize=8)
+def row_title_image(title, width):
+    right = font(14).getbbox(title, anchor="lt")[2]
+    image = Image.new("RGB", (max(width, right), 18), SURFACE)
+    ImageDraw.Draw(image).text((0, 0), title, font=font(14), fill=TEXT, anchor="lt")
+    return image
+
+
+@lru_cache(maxsize=1)
+def row_title_pixels(title, width):
+    image = row_title_image(title, width)
+    return image.width * 2, rgb565(image)
+
+
+def row_scroll_frame(view, elapsed):
+    row = selected_row_title(view)
+    if row is None:
+        return 0, 0.12
+    title, _, _, width = row
+    return scroll_frame(row_title_image(title, width).width - width, elapsed)
 
 
 @lru_cache(maxsize=4)
@@ -336,7 +392,7 @@ def draw_transport(draw, playback):
     mode, previous, toggle, following, favorite = (52, 109, 165, 220, 274)
     y = 153
     status = playback.get("status")
-    loading = status == "starting"
+    loading = status in ("starting", "retrying")
     disabled = status in ("idle", "starting")
     draw.rectangle((0, 136, 319, 169), fill=WHITE)
     draw.line((0, 136, 319, 136), fill=SURFACE)
@@ -345,7 +401,7 @@ def draw_transport(draw, playback):
     draw_skip(draw, following, y, 1, MUTED if disabled else TEXT)
     button_color = SURFACE if loading else "#9b8b91" if status == "idle" else ACCENT
     draw.ellipse((toggle - 13, y - 13, toggle + 13, y + 13), fill=button_color)
-    if status == "playing":
+    if status in ("playing", "buffering"):
         draw.rounded_rectangle((toggle - 5, y - 6, toggle - 2, y + 6), radius=1, fill=WHITE)
         draw.rounded_rectangle((toggle + 2, y - 6, toggle + 5, y + 6), radius=1, fill=WHITE)
     elif loading:
@@ -437,6 +493,15 @@ def render(view):
                 y += row_height
         else:
             details(draw, detail, 10, y + 26, 300, body_bottom - (22 if progress else 0))
+
+        if "row_scroll" in view:
+            row = selected_row_title(view)
+            if row is not None:
+                title, rx, ry, width = row
+                strip = row_title_image(title, width)
+                if strip.width > width:
+                    offset = view["row_scroll"]
+                    image.paste(strip.crop((offset, 0, offset + width, 18)), (rx, ry))
 
         if progress:
             draw_progress(draw, progress, 10, body_bottom - 18, 300)

@@ -2,7 +2,7 @@ from io import BytesIO
 import unittest
 from PIL import Image
 
-from device import Device, render, rgb565, title_scroll_frame
+from device import Device, render, rgb565, row_scroll_frame, title_scroll_frame
 
 
 class PlaybackTitleTest(unittest.TestCase):
@@ -27,3 +27,18 @@ class PlaybackTitleTest(unittest.TestCase):
 
     def test_short_title_keeps_the_normal_refresh_interval(self):
         self.assertEqual(title_scroll_frame("晴天", 5), (0, 0.12))
+
+    def test_selected_row_scroll_preserves_subtitle_and_loading(self):
+        for subtitle in ("歌手", ""):
+            with self.subTest(subtitle=subtitle):
+                view = {"tab": 1, "heading": "歌单", "detail": "第 2 页", "selected": 7,
+                        "rows": [("很长的歌曲或者歌单名称" * 6, subtitle)] * 10,
+                        "loading_row": 7, "loading_frame": 3, "notice": "正在加载"}
+                device = Device.__new__(Device)
+                device.framebuffer = BytesIO()
+                device.show(render(view | {"row_scroll": 0}))
+                offset, interval = row_scroll_frame(view, 1.05)
+                self.assertGreater(offset, 0)
+                self.assertLessEqual(interval, 0.04)
+                device.show_row_title(view, offset)
+                self.assertEqual(device.framebuffer.getvalue(), rgb565(render(view | {"row_scroll": offset})))

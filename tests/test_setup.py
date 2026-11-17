@@ -69,6 +69,24 @@ class SetupTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("node"), "requires Node.js")
 class BackendSetupTest(unittest.TestCase):
+    def test_initialization_removes_credentials_but_preserves_active_locks(self):
+        with TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "profile"
+            home = profile / "account-test"
+            credentials = home / ".config/ncm-cli/credentials.enc.json"
+            credentials.parent.mkdir(parents=True)
+            credentials.write_text("test secret")
+            (profile / "current").symlink_to(home.name)
+            (profile / ".lock").write_text("")
+            (profile / ".ui-lock").write_text("")
+            (profile / "settings.json").write_text("{}")
+            backend = Netease(profile, "/unused")
+            self.assertTrue(backend.configured())
+            backend.reset()
+            self.assertFalse(backend.configured())
+            self.assertFalse(home.exists())
+            self.assertEqual({item.name for item in profile.iterdir()}, {".lock", ".ui-lock"})
+
     def test_cli_stdin_and_qr_validation_preserve_previous_profile(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

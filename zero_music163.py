@@ -11,7 +11,7 @@ import sys
 from time import monotonic, sleep
 
 from app import App
-from device import Device, FRAMEBUFFER, KEYBOARD, render, title_scroll_frame
+from device import Device, FRAMEBUFFER, KEYBOARD, render, row_scroll_frame, title_scroll_frame
 from netease import Netease
 
 
@@ -124,6 +124,7 @@ def run(args):
         try:
             last = None
             last_offset = 0
+            last_row_offset = 0
             while app.running:
                 frame_start = monotonic()
                 app.tick()
@@ -132,12 +133,23 @@ def run(args):
                 view = app.view()
                 elapsed = view.pop("title_scroll", None)
                 offset, interval = (0, 0.12) if elapsed is None else title_scroll_frame(view["heading"], elapsed)
+                row_elapsed = view.pop("row_scroll_elapsed", None)
+                row_offset = 0
+                if row_elapsed is not None:
+                    row_offset, row_interval = row_scroll_frame(view, row_elapsed)
+                    interval = min(interval, row_interval)
                 if view != last:
-                    device.show(render(view | {"title_scroll": offset}))
+                    frame = view | {"title_scroll": offset}
+                    if row_elapsed is not None:
+                        frame["row_scroll"] = row_offset
+                    device.show(render(frame))
                     last = view
                 elif offset != last_offset:
                     device.show_title(view["heading"], offset)
+                elif row_offset != last_row_offset:
+                    device.show_row_title(view, row_offset)
                 last_offset = offset
+                last_row_offset = row_offset
                 for key, value in device.events(max(0, frame_start + interval - monotonic())):
                     app.key(key, value)
                     if not app.running:

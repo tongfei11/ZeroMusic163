@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -37,10 +38,12 @@ def memory_available(minimum_mib):
 class NeteaseError(Exception):
     """A user-readable error which never includes raw CLI output."""
 
-    def __init__(self, message, *, reauth=False, check_session=False):
+    def __init__(self, message, *, reauth=False, check_session=False, retryable=False, unavailable=False):
         super().__init__(message)
         self.reauth = reauth
         self.check_session = check_session
+        self.retryable = retryable
+        self.unavailable = unavailable
 
 
 class Netease:
@@ -120,9 +123,9 @@ class Netease:
             except FileNotFoundError:
                 raise NeteaseError("找不到官方 ncm-cli，请检查安装。") from None
             except subprocess.TimeoutExpired:
-                raise NeteaseError("网易云音乐请求超时，请重试。") from None
+                raise NeteaseError("网易云音乐请求超时，请重试。", retryable=True) from None
             except (OSError, ValueError):
-                raise NeteaseError("无法启动网易云音乐 CLI。") from None
+                raise NeteaseError("音乐服务暂时不可用，请重试。", retryable=True) from None
 
             output = output.strip()
             try:
@@ -219,8 +222,15 @@ class Netease:
     def _error(payload, stderr=""):
         message = str(payload.get("message", "")) if isinstance(payload, dict) else stderr
         auth_terms = ("未登录", "请先登录", "未授权", "登录已过期", "登录失效", "重新登录", "token expired")
-        if any(term in message.lower() for term in auth_terms):
+        if any(term in message.lower() for term in auth_terms) or "HTTP 401" in message:
             return NeteaseError("请先扫码登录网易云音乐。", reauth=True)
+        network_terms = ("fetch failed", "econnreset", "enotfound", "eai_again", "enetunreach",
+                         "etimedout", "timeout", "超时", "连接失败", "network", "http 408",
+                         "http 500", "http 502", "http 503", "http 504")
+        if any(term in message.lower() for term in network_terms):
+            return NeteaseError("网络连接失败，请稍后重试。", retryable=True)
+        if any(term in message for term in ("不可播放", "无播放权限", "无版权", "未购买")):
+            return NeteaseError("这首歌暂不可播放。", unavailable=True)
         for terms, user_message in (
             (("mpv not found", "未安装 mpv", "找不到 mpv", "mpv 未安装"), "找不到 mpv，请检查安装。"),
             (("请求总量超限", "限流"), "网易云音乐请求次数已达上限。"),
@@ -311,7 +321,9 @@ class Netease:
     def account_status(self):
         try:
             profile = self._data("user", "info")
-        except NeteaseError:
+        except NeteaseError as error:
+            if error.retryable:
+                raise
             return self.login_status()
         return {"success": True, "user": profile}
 
@@ -343,6 +355,44 @@ class Netease:
             with self._media_lock:
                 self._media_urls.clear()
             self._discard_audio_cache()
+
+    def reset(self):
+        """Clear this app's credentials and session while retaining process locks."""
+        with self._lock:
+            self._close_resident()
+            self.control("stop")
+            self._discard_audio_cache()
+            self._pending_login = None
+            with self._media_lock:
+                self._media_urls.clear()
+            try:
+                accounts = list(self.profile.glob("account-*"))
+                homes = {os.fsencode(str(self._runtime_path(account) / "home")) for account in accounts}
+                if sys.platform.startswith("linux") and homes:
+                    for process in Path("/proc").iterdir():
+                        if not process.name.isdigit():
+                            continue
+                        try:
+                            if process.stat().st_uid != os.getuid() or (process / "comm").read_text().strip() != "node":
+                                continue
+                            environment = (process / "environ").read_bytes().split(b"\0")
+                            if any(b"ZEROMUSIC_NCM_PROFILE=" + home in environment for home in homes):
+                                os.kill(int(process.name), signal.SIGKILL)
+                        except (OSError, ProcessLookupError):
+                            continue
+                self._current.unlink(missing_ok=True)
+                if self.profile.exists():
+                    for item in self.profile.iterdir():
+                        if item.name in (".lock", ".ui-lock"):
+                            continue
+                        if item.name.startswith("account-"):
+                            shutil.rmtree(self._runtime_path(item), ignore_errors=True)
+                        if item.is_dir() and not item.is_symlink():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink(missing_ok=True)
+            except OSError:
+                raise NeteaseError("无法清除本地配置，请检查存储空间与权限。") from None
 
     @staticmethod
     def _record(record):
@@ -542,16 +592,18 @@ class Netease:
         except MpvError as error:
             with self._media_lock:
                 self._media_urls.pop(key, None)
-            raise NeteaseError(str(error)) from None
+            raise NeteaseError(str(error), retryable="解码" not in str(error), unavailable="解码" in str(error)) from None
 
     def _fetch_media(self, home, key):
         if self._supports_resident():
             with self._lock:
                 try:
                     output, errors, code = self._resident_request({"media": key[0]}, self._environment(home), home)
+                    if code:
+                        raise self._error(None, errors)
                     data = json.loads(output)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
-                    raise NeteaseError("网易云音乐请求失败，请重试。") from None
+                    raise NeteaseError("网易云音乐请求失败，请重试。", retryable=True) from None
                 if code or not isinstance(data, dict) or data.get("code") != 200:
                     raise self._error(data, errors)
                 media = data.get("data") or {}
@@ -569,7 +621,7 @@ class Netease:
                     not location.hostname or location.username is not None):
                 raise ValueError
         except ValueError:
-            raise NeteaseError("网易云音乐没有返回可用播放地址。") from None
+            raise NeteaseError("网易云音乐没有返回可用播放地址。", unavailable=True) from None
         expiry = payload.get("expiresAt")
         if isinstance(expiry, (int, float)) and expiry > time.time() * 1000 + 5000:
             with self._media_lock:
@@ -605,9 +657,9 @@ class Netease:
                 continue
             if isinstance(payload, dict):
                 if payload.get("network"):
-                    raise NeteaseError("连接网易云音乐失败，请重试播放。")
+                    raise NeteaseError("连接网易云音乐失败，请重试播放。", retryable=True)
                 return payload
-        raise NeteaseError("网易云音乐播放请求超时，请重试。")
+        raise NeteaseError("网易云音乐播放请求超时，请重试。", retryable=True)
 
     def state(self):
         player = self._player
