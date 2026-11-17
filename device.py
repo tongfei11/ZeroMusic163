@@ -143,9 +143,14 @@ def draw_tabs(draw, tab):
     for index, label in enumerate(TABS):
         left = index * 80
         if index == tab:
-            draw.rounded_rectangle((left + 8, 3, left + 72, 23), radius=5, fill="#ae192c")
-            draw.rounded_rectangle((left + 29, 22, left + 51, 24), radius=1, fill=WHITE)
+            draw.rectangle((left + 29, 23, left + 51, 24), fill=WHITE)
         draw.text((left + 40, 13), label, font=font(14), fill=WHITE, anchor="mm")
+
+
+def draw_loading(draw, x, y, frame):
+    box = (x - 5, y - 5, x + 5, y + 5)
+    draw.ellipse(box, outline="#efc1c7", width=1)
+    draw.arc(box, start=frame * 45, end=frame * 45 + 130, fill=ACCENT, width=2)
 
 
 def draw_profile(image, draw, view):
@@ -167,7 +172,10 @@ def draw_profile(image, draw, view):
         line(draw, title, 14, y + 4, 196 if subtitle else 280, 13, ACCENT if active else TEXT)
         if subtitle:
             line(draw, subtitle, 213, y + 5, 83, 11, MUTED)
-        draw.line((305, y + 7, 308, y + 10, 305, y + 13), fill=ACCENT if active else MUTED, width=1)
+        if index == view.get("loading_row"):
+            draw_loading(draw, 306, y + 10, view["loading_frame"])
+        else:
+            draw.line((305, y + 7, 308, y + 10, 305, y + 13), fill=ACCENT if active else MUTED, width=1)
 
 
 def draw_progress(draw, progress, x, y, width):
@@ -210,7 +218,7 @@ def draw_playback(image, draw, view):
     playback = view["playback"]
     status = playback.get("status")
     playing = status == "playing"
-    states = {"playing": "播放中", "paused": "已暂停", "starting": "载入中",
+    states = {"idle": "待播放", "playing": "播放中", "paused": "已暂停", "starting": "载入中",
               "ended": "已播完", "failed": "播放失败"}
     state = states.get(status, "")
     mode = playback.get("mode") or ""
@@ -219,7 +227,8 @@ def draw_playback(image, draw, view):
     line(draw, view.get("detail"), 10, 56, 180, 12, MUTED)
     draw_progress(draw, view.get("progress"), 10, 78, 176)
     line(draw, stats, 10, 101, 177, 11, ACCENT if status == "failed" else MUTED)
-    draw.ellipse((73, 111, 101, 139), fill="#a19396" if status == "starting" else ACCENT)
+    disabled = status in ("idle", "starting")
+    draw.ellipse((73, 111, 101, 139), fill="#a19396" if disabled else ACCENT)
     if playing:
         draw.rounded_rectangle((82, 118, 85, 132), radius=1, fill=WHITE)
         draw.rounded_rectangle((89, 118, 92, 132), radius=1, fill=WHITE)
@@ -228,10 +237,10 @@ def draw_playback(image, draw, view):
             draw.ellipse((x - 1, 124, x + 1, 126), fill=WHITE)
     else:
         draw.polygon(((84, 117), (84, 133), (95, 125)), fill=WHITE)
-    line(draw, "Z 上一首", 10, 121, 60, 11)
-    line(draw, "C 下一首", 125, 121, 62, 11)
-    action = {"playing": "空格 暂停", "starting": "正在载入", "failed": "Enter 重试"}.get(status, "空格 播放")
-    line(draw, action, 65, 140, 65, 10, ACCENT)
+    line(draw, "Z 上一首", 10, 121, 60, 11, MUTED if disabled else TEXT)
+    line(draw, "C 下一首", 125, 121, 62, 11, MUTED if disabled else TEXT)
+    actions = {"idle": "等待选歌", "playing": "空格 暂停", "starting": "正在载入", "failed": "Enter 重试"}
+    line(draw, actions.get(status, "空格 播放"), 65, 140, 65, 10, MUTED if disabled else ACCENT)
 
     draw_record(image, draw, playback.get("artwork"))
     if playback.get("liked"):
@@ -289,13 +298,16 @@ def render(view):
                     draw.rectangle((5, y, 314, y + row_height - 1), fill=SURFACE)
                     draw.rectangle((5, y + 2, 6, y + row_height - 3), fill=ACCENT)
                 stacked = tab is None or progress
-                width = 297 if stacked or not subtitle else 176
+                loading = index == view.get("loading_row")
+                width = (282 if loading else 297) if stacked or not subtitle else 176
                 line(draw, title, 11, y + 4, width, 14)
                 if subtitle and not progress:
                     if stacked:
                         line(draw, subtitle, 11, y + 30, 297, 12, MUTED)
                     else:
-                        line(draw, subtitle, 195, y + 5, 112, 12, MUTED)
+                        line(draw, subtitle, 195, y + 5, 100 if loading else 112, 12, MUTED)
+                if loading:
+                    draw_loading(draw, 306, y + 11, view["loading_frame"])
                 y += row_height
         else:
             details(draw, detail, 10, y + 26, 300, body_bottom - (22 if progress else 0))

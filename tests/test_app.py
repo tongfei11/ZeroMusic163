@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 import unittest
 
 from app import App
@@ -153,7 +154,10 @@ class AppTest(unittest.TestCase):
         self.key("x")
         self.assertEqual(self.app.player.volume, 65)
         self.assertFalse(self.client.controls)
-        self.assertEqual(self.app.view()["detail"], "音量 65")
+        view = self.app.view()
+        self.assertEqual(view["playback"]["volume"], 65)
+        self.assertEqual(view["playback"]["status"], "idle")
+        self.assertEqual(view["progress"], (0, 0))
 
     def test_escaped_search_does_not_show_stale_result(self):
         self.key("x")
@@ -174,6 +178,31 @@ class AppTest(unittest.TestCase):
         self.assertTrue(page.items[0]["liked"])
         self.key("esc")
         self.assertEqual(len(self.app.library), 1)
+
+    def test_library_loading_animates_on_the_requested_row(self):
+        released = Event()
+        self.addCleanup(released.set)
+        original = self.client.library
+
+        def blocked(kind):
+            released.wait(2)
+            return original(kind)
+
+        self.client.library = blocked
+        self.key("tab")
+        self.key("enter")
+        first = self.app.view()
+        self.assertEqual(first["profile_name"], "测试帐号")
+        self.assertEqual(first["loading_row"], 0)
+        self.time += 0.3
+        self.key("x")
+        second = self.app.view()
+        self.assertEqual(second["selected"], 1)
+        self.assertEqual(second["loading_row"], 0)
+        self.assertNotEqual(second["loading_frame"], first["loading_frame"])
+        released.set()
+        self.wait("library")
+        self.assertNotIn("loading_row", self.app.view())
 
     def test_next_page_failure_keeps_existing_tracks(self):
         seen = []

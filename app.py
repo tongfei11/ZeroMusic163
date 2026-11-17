@@ -58,6 +58,7 @@ class App:
             except (OSError, ValueError, AttributeError):
                 pass
         self.jobs = {}
+        self.library_loading = None
         self.running = True
         self.screen = "checking"
         self.return_screen = "ready"
@@ -97,6 +98,8 @@ class App:
         completed = [(key, job) for key, job in self.jobs.items() if job[0].done()]
         for key, (future, success, failure) in completed:
             del self.jobs[key]
+            if key == "library":
+                self.library_loading = None
             try:
                 result = future.result()
             except NeteaseError as error:
@@ -417,6 +420,12 @@ class App:
         return Page(title, "tracks", items, playlist_id=playlist_id,
                     has_more=len(items) == PLAYLIST_PAGE_SIZE, liked=liked)
 
+    def submit_library(self, page, fetch, done, failed):
+        if "library" in self.jobs:
+            return
+        self.library_loading = (page, page.selected, self.clock())
+        self.submit("library", fetch, done, failed)
+
     def open_list(self, fetch, parent):
         selected = parent.selected
 
@@ -432,7 +441,7 @@ class App:
             if still_selected():
                 self.error(error)
 
-        self.submit("library", fetch, done, failed)
+        self.submit_library(parent, fetch, done, failed)
 
     def load_more_tracks(self, page):
         offset = len(page.items)
@@ -456,7 +465,7 @@ class App:
             if self.library[-1] is page:
                 self.error(error)
 
-        self.submit("library", partial(self.client.tracks, page.playlist_id, offset), done, failed)
+        self.submit_library(page, partial(self.client.tracks, page.playlist_id, offset), done, failed)
 
     def do_logout(self):
         self.screen = "checking"
@@ -738,12 +747,13 @@ class App:
             rows = [(label, ("开启" if self.hide_unplayable else "关闭") if action == "hide-unplayable" else "")
                     for label, action in page.items]
             detail = self.account if page.kind == "settings" else ""
-        if "library" in self.jobs:
-            detail = "正在加载…"
         view = dict(heading=page.title, detail=detail, rows=rows, selected=page.selected,
                     footer="F/X 选择 · Enter 打开 · Esc 返回")
         if page.kind == "menu":
             view.update(profile_name=self.account or "已登录", avatar=self.avatar)
+        if self.library_loading and self.library_loading[0] is page:
+            _, row, started = self.library_loading
+            view.update(loading_row=row, loading_frame=int((self.clock() - started) * 6) % 8)
         return view
 
     def player_view(self):
@@ -751,10 +761,8 @@ class App:
         if self.overlay:
             return self.list_view(self.overlay)
         track = self.pending_track or player.current
-        if not track:
-            return dict(heading="还没有播放歌曲", detail=f"音量 {player.volume}", footer="F/X 音量 · Tab 换页")
-        title = track.get("name") or "未知歌曲"
-        if self.lyrics_visible and not self.pending_track:
+        title = (track.get("name") or "未知歌曲") if track else "还没有播放歌曲"
+        if track and self.lyrics_visible and not self.pending_track:
             lyrics = self.lyric_cache.get(player.current["id"])
             if not lyrics:
                 detail = "正在加载…" if f"lyric-{player.current['id']}" in self.jobs else "暂无歌词"
@@ -766,9 +774,9 @@ class App:
                         selected=active, footer="Esc 返回")
         progress = (0, 0) if self.pending_track else (player.position, player.duration)
         status = "starting" if self.pending_track else player.status
-        return dict(heading=title, detail=artists(track), progress=progress,
+        return dict(heading=title, detail=artists(track) if track else "", progress=progress,
                     playback={"status": status, "mode": MODES[player.mode], "volume": player.volume,
-                              "liked": bool(track.get("liked")), "artwork": self.artwork})
+                              "liked": bool(track and track.get("liked")), "artwork": self.artwork})
 
     def queue_view(self):
         player = self.player
