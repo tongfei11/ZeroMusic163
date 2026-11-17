@@ -11,6 +11,8 @@ from threading import Lock, RLock
 import time
 from urllib.parse import urlsplit
 
+from mpv_ipc import Mpv, MpvError
+
 
 PLAYLIST_PAGE_SIZE = 30
 
@@ -34,6 +36,7 @@ class Netease:
         self._closing = False
         self._pending_login = None
         self._current = self.profile / "current"
+        self._player = None
 
     def configured(self) -> bool:
         home = self._current
@@ -59,7 +62,7 @@ class Netease:
                 raise NeteaseError("无法创建隔离的播放器目录。") from None
         return path
 
-    def _run(self, *args, home=None, private_input=None, allow_failure=False, allow_empty=False):
+    def _run(self, *args, home=None, private_input=None, allow_failure=False, allow_empty=False, media_file=None):
         with self._lock:
             if home is None:
                 if not self.configured():
@@ -79,6 +82,8 @@ class Netease:
                 environment.pop("ZEROMUSIC_NCM_CONFIG_INPUT", None)
                 if private_input is not None:
                     environment["ZEROMUSIC_NCM_CONFIG_INPUT"] = "1"
+                if media_file is not None:
+                    environment["ZEROMUSIC_NCM_MEDIA_FILE"] = str(media_file)
                 output, errors, returncode = self._invoke(args, environment, home, private_input)
             except FileNotFoundError:
                 raise NeteaseError("找不到官方 ncm-cli，请检查安装。") from None
@@ -196,6 +201,9 @@ class Netease:
                 os.replace(link, self._current)
                 committed = True
                 self._pending_login = (time.monotonic(), qr)
+                if self._player is not None:
+                    self._player.close()
+                    self._player = None
                 if previous and previous.parent == self.profile and previous.name.startswith("account-"):
                     try:
                         self._run("stop", home=previous, allow_empty=True)
@@ -311,24 +319,65 @@ class Netease:
     def like(self, song_id, liked):
         self._dynamic("song", "like" if liked else "dislike", f"--songId={song_id}")
 
-    def play(self, track):
+    def play(self, track, *, volume=75):
         if track.get("visible") is False:
             raise NeteaseError("当前歌曲暂不可播放。")
         if not track.get("id") or not track.get("originalId"):
             raise NeteaseError("这首歌缺少官方播放器需要的歌曲 ID。")
-        self._run(
-            "play", "--song", f"--encrypted-id={track['id']}",
-            f"--original-id={track['originalId']}", allow_empty=True,
-        )
+        home = self._current.resolve(strict=True)
+        with tempfile.TemporaryDirectory(prefix="media-", dir=self._runtime(home)) as staging:
+            media_file = Path(staging) / "response.json"
+            self._run("play", "--song", "--encrypted-id", str(track["id"]),
+                      "--original-id", str(track["originalId"]), allow_empty=True,
+                      media_file=media_file)
+            payload = self._wait_for_media(media_file)
+        url = payload.get("url")
+        try:
+            location = urlsplit(url) if isinstance(url, str) else None
+            if (location is None or location.scheme not in ("http", "https") or
+                    not location.hostname or location.username is not None):
+                raise ValueError
+        except ValueError:
+            raise NeteaseError("网易云音乐没有返回可用播放地址。") from None
+        if self._player is None:
+            self._player = Mpv(self._runtime(home) / "zeromusic-audio.sock", lambda: self._closing)
+        try:
+            self._player.play(url, volume)
+        except MpvError as error:
+            raise NeteaseError(str(error)) from None
+
+    def _wait_for_media(self, media_file):
+        end = time.monotonic() + 24
+        while time.monotonic() < end and not self._closing:
+            try:
+                payload = json.loads(media_file.read_text())
+            except (FileNotFoundError, ValueError):
+                time.sleep(0.15)
+                continue
+            if isinstance(payload, dict):
+                if payload.get("network"):
+                    raise NeteaseError("连接网易云音乐失败，请重试播放。")
+                return payload
+        raise NeteaseError("网易云音乐播放请求超时，请重试。")
 
     def state(self):
-        payload = self._run("state")
-        state = payload.get("state") if isinstance(payload, dict) else None
-        if not isinstance(state, dict):
-            raise NeteaseError("网易云音乐未返回播放器状态。")
-        return state
+        return self._player.state() if self._player else {"status": "stopped"}
 
     def control(self, command, *args):
-        if command not in ("pause", "resume", "stop", "next", "prev", "seek", "volume", "queue"):
-            raise NeteaseError("未知的播放操作。")
-        return self._run(command, *args, allow_empty=True)
+        player = self._player
+        if command == "stop":
+            if player:
+                player.close()
+                self._player = None
+            return
+        if player is None:
+            raise NeteaseError("当前没有正在播放的歌曲。")
+        try:
+            if command in ("pause", "resume"):
+                player.command("set_property", "pause", command == "pause")
+            elif command == "volume":
+                player.command("set_property", "volume", int(args[0]))
+            else:
+                raise NeteaseError("未知的播放操作。")
+        except MpvError as error:
+            raise NeteaseError(str(error)) from None

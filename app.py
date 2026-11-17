@@ -422,26 +422,14 @@ class App:
             return
         origin, volume = self.tab, self.player.volume
 
-        def play():
-            self.client.play(track)
-            try:
-                self.client.control("resume")
-                self.client.control("volume", str(volume))
-            except NeteaseError as error:
-                if getattr(error, "reauth", False):
-                    raise
-                # The daemon may still be opening the track. Observe its state below.
-                return False
-            return True
-
-        def done(controls_applied):
+        def done(_result):
             if previous:
                 self.player.history.pop()
             self.player.jump(track, remaining, remember=not previous)
             self.track_started_at, self.next_poll = self.clock(), 0
             self.queue_selection = 0
             self.lyrics_visible = False
-            self.notice("" if controls_applied else "正在等待播放器")
+            self.notice("")
             if switch and self.tab == origin:
                 self.tab = 2
 
@@ -451,7 +439,9 @@ class App:
                 self.player.upcoming = remaining
                 self.advance()
 
-        self.submit("play", play, done, failed)
+        if "play" not in self.jobs:
+            self.notice("正在载入歌曲…", seconds=60)
+            self.submit("play", partial(self.client.play, track, volume=volume), done, failed)
 
     def position_changed(self, state):
         if "play" in self.jobs or "control" in self.jobs:

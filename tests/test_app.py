@@ -32,7 +32,7 @@ class FakeClient:
         assert collection == "liked"
         return [song()]
 
-    def play(self, track):
+    def play(self, track, *, volume):
         self.plays.append(track["id"])
 
     def control(self, command, *args):
