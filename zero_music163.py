@@ -16,7 +16,9 @@ from netease import Netease
 
 
 INSTALL_ROOT = Path.home() / ".local/share/zero-music163"
-VERSION = Path(__file__).with_name("VERSION").read_text().strip()
+APP_ROOT = Path(__file__).resolve().parent
+PACKAGED_CLI = APP_ROOT / "node_modules/.bin/ncm-cli"
+VERSION = (APP_ROOT / "VERSION").read_text().strip()
 
 
 def try_lock(lock):
@@ -50,7 +52,8 @@ def main():
     parser.add_argument("--framebuffer", default=FRAMEBUFFER)
     parser.add_argument("--keyboard", default=KEYBOARD)
     parser.add_argument("--profile", type=Path, default=INSTALL_ROOT / "profile")
-    parser.add_argument("--cli", default=str(INSTALL_ROOT / "runtime/node_modules/.bin/ncm-cli"))
+    parser.add_argument("--cli", default=str(PACKAGED_CLI if PACKAGED_CLI.is_file()
+                                             else INSTALL_ROOT / "runtime/node_modules/.bin/ncm-cli"))
     parser.add_argument("--background", nargs=2, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     handoff = None

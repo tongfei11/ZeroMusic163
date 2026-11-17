@@ -41,11 +41,14 @@ def main():
         client = Netease(profile, "")
         client.adopt_playback()
         client.reset()
-        subprocess.run([
-            "sudo", "rm", "-rf", "--", "/usr/local/lib/zero-music163",
-            "/usr/share/APPLaunch/applications/zero-music163.desktop",
-            "/usr/share/APPLaunch/share/images/zero-music163.png",
-        ], check=True)
+        if Path(__file__).resolve().parent == Path("/usr/lib/zero-music163"):
+            subprocess.run(["sudo", "dpkg", "--remove", "zero-music163"], check=True)
+        else:
+            subprocess.run([
+                "sudo", "rm", "-rf", "--", "/usr/local/lib/zero-music163",
+                "/usr/share/APPLaunch/applications/zero-music163.desktop",
+                "/usr/share/APPLaunch/share/images/zero-music163.png",
+            ], check=True)
         shutil.rmtree(root)
     print("已卸载 ZeroMusic163，并清除开发者配置、音乐登录和本地数据。")
     return 0
