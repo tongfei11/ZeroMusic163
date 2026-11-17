@@ -40,7 +40,7 @@ def main():
 def run(args):
     device = Device(args.framebuffer, args.keyboard)
     try:
-        app = App(Netease(args.profile, args.cli))
+        app = App(Netease(args.profile, args.cli), settings_path=args.profile / "settings.json")
         def stop(_signal, _frame):
             app.running = False
 

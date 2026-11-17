@@ -3,7 +3,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
+import json
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from time import monotonic
+
+from artwork import download_thumbnail
 
 from netease import NeteaseError, PLAYLIST_PAGE_SIZE
 from player import MODES, Player, artists, lyric_lines, playable, track_rows
@@ -13,7 +18,8 @@ from setup_web import SetupWeb
 TABS = ("搜索", "歌单", "播放", "队列")
 LIBRARY = [("喜欢的音乐", "favorite"), ("我的歌单", "created"), ("每日推荐", "daily"), ("设置", "settings")]
 SCENES = LIBRARY[:3]
-SETTINGS = [("修改网页配置", "setup"), ("重新登录", "login"), ("退出登录", "logout")]
+SETTINGS = [("隐藏不可播放曲目", "hide-unplayable"), ("修改网页配置", "setup"),
+            ("重新登录", "login"), ("退出登录", "logout")]
 MOVES = {"f": -1, "up": -1, "x": 1, "down": 1}
 PREVIOUS, NEXT = ("z", "left"), ("c", "right")
 
@@ -39,9 +45,18 @@ class Search:
 
 
 class App:
-    def __init__(self, client, web=SetupWeb, clock=monotonic):
+    def __init__(self, client, web=SetupWeb, clock=monotonic, settings_path=None):
         self.client, self.web_factory, self.clock = client, web, clock
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ncm")
+        self.images = ThreadPoolExecutor(max_workers=1, thread_name_prefix="images")
+        self.audio = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio")
+        self.settings_path = Path(settings_path) if settings_path else None
+        self.hide_unplayable = False
+        if self.settings_path:
+            try:
+                self.hide_unplayable = json.loads(self.settings_path.read_text()).get("hide_unplayable") is True
+            except (OSError, ValueError, AttributeError):
+                pass
         self.jobs = {}
         self.running = True
         self.screen = "checking"
@@ -56,6 +71,10 @@ class App:
         self.login_completed = False
         self.login_attempt = 0
         self.account = ""
+        self.avatar_url, self.avatar = "", None
+        self.profile_at = None
+        self.artwork_url, self.artwork = "", None
+        self.pending_track = None
         self.player = Player()
         self.track_started_at = 0
         self.queue_selection = 0
@@ -64,9 +83,10 @@ class App:
         self.notice_text, self.notice_until = "", 0
         self.start()
 
-    def submit(self, key, action, success, failure=None):
+    def submit(self, key, action, success, failure=None, *, image=False):
         if key not in self.jobs:
-            self.jobs[key] = (self.pool.submit(action), success, failure)
+            executor = self.images if image else self.audio if key in ("position", "control") else self.pool
+            self.jobs[key] = (executor.submit(action), success, failure)
 
     def tick(self):
         now = self.clock()
@@ -91,11 +111,15 @@ class App:
             self.close_web()
             self.player = Player()
             self.login_completed = False
-            self.account = ""
+            self.clear_account()
             self.request_login()
         if self.screen == "login" and self.qr and now >= self.qr_deadline:
             self.qr = ""
             self.notice("二维码已过期，按 Enter 刷新", seconds=300)
+        if (self.profile_at is not None and now >= self.profile_at
+                and self.screen == "ready" and self.tab == 1 and not self.jobs):
+            self.profile_at = None
+            self.submit("profile", self.client.account_status, self.apply_account, lambda _error: None)
         if now < self.next_poll:
             return
         if self.screen == "login" and self.qr:
@@ -120,7 +144,7 @@ class App:
     def start(self):
         self.screen = "checking"
         if self.client.configured():
-            self.submit("login-status", self.client.login_status, self.initial_login, self.login_error)
+            self.submit("login-status", self.client.account_status, self.initial_login, self.login_error)
         else:
             self.open_setup()
 
@@ -131,14 +155,72 @@ class App:
     def finish_login(self, data):
         if not data.get("success"):
             return False
-        user = data.get("user") or data.get("userInfo") or data.get("profile") or data.get("data") or data
-        if not isinstance(user, dict):
-            user = {}
-        self.account = user.get("nickname") or user.get("name") or "已登录"
+        self.apply_account(data)
+        self.profile_at = None if data.get("user") else self.clock() + 2
         self.login_completed = True
         self.screen, self.qr = "ready", ""
         self.notice("")
         return True
+
+    def apply_account(self, data):
+        user = data.get("user")
+        if not isinstance(user, dict):
+            self.account = "已登录"
+            return
+        self.account = user.get("nickname") or "已登录"
+        url = user.get("avatarUrl")
+        if not isinstance(url, str) or not url or url == self.avatar_url:
+            return
+        self.avatar_url, self.avatar = url, None
+
+        def done(image):
+            if self.avatar_url == url:
+                self.avatar = image
+
+        self.submit(f"avatar-{url}", partial(download_thumbnail, url, 48), done, image=True)
+
+    def clear_account(self):
+        self.account = ""
+        self.avatar_url, self.avatar = "", None
+        self.profile_at = None
+        self.artwork_url, self.artwork = "", None
+
+    def show_artwork(self, track):
+        album = track.get("album")
+        cover = track.get("coverImgUrl") or (album.get("coverImgUrl") if isinstance(album, dict) else None)
+        url = cover if isinstance(cover, str) else ""
+        if url == self.artwork_url:
+            return
+        self.artwork_url, self.artwork = url, None
+        if not url:
+            return
+
+        def done(image):
+            if self.artwork_url == url:
+                self.artwork = image
+
+        self.submit(f"cover-{url}", partial(download_thumbnail, url, 80), done, image=True)
+
+    def visible_tracks(self, tracks):
+        return [track for track in tracks if playable(track)] if self.hide_unplayable else tracks
+
+    def toggle_hidden_tracks(self):
+        enabled = not self.hide_unplayable
+        if self.settings_path:
+            temporary = None
+            try:
+                with NamedTemporaryFile(mode="w", dir=self.settings_path.parent, delete=False) as output:
+                    temporary = Path(output.name)
+                    json.dump({"hide_unplayable": enabled}, output)
+                temporary.replace(self.settings_path)
+            except OSError:
+                self.notice("无法保存设置")
+                return
+            finally:
+                if temporary:
+                    temporary.unlink(missing_ok=True)
+        self.hide_unplayable = enabled
+        self.search.selected = 0
 
     def login_error(self, error):
         self.screen, self.qr = "login", ""
@@ -252,9 +334,11 @@ class App:
                 if len(search.query) < 80:
                     search.query += " " if key == "space" else key
                     self.search_edited()
-        elif search.tracks:
-            search.selected = moved(search.selected, key, len(search.tracks))
-            self.track_key(key, search.tracks[search.selected])
+        else:
+            tracks = self.visible_tracks(search.tracks)
+            if tracks:
+                search.selected = moved(search.selected, key, len(tracks))
+                self.track_key(key, tracks[search.selected])
 
     def search_edited(self):
         self.search.generation += 1
@@ -279,17 +363,19 @@ class App:
         self.submit(f"search-{generation}", partial(self.client.search, keyword), done, failed)
 
     def library_key(self, key, page):
-        if not page.items:
-            return
         if page.kind == "tracks":
-            page.selected = moved(page.selected, key, len(page.items) + 1 + page.has_more)
-            if page.selected == 0 and key == "enter":
-                self.play_all(page.items)
-            elif page.has_more and page.selected == len(page.items) + 1:
-                if key == "enter":
-                    self.load_more_tracks(page)
-            elif page.selected > 0:
-                self.track_key(key, page.items[page.selected - 1])
+            tracks = self.visible_tracks(page.items)
+            rows = len(tracks) + bool(tracks)
+            page.selected = moved(page.selected, key, rows + page.has_more)
+            if page.has_more and page.selected == rows and key == "enter":
+                self.load_more_tracks(page)
+            elif tracks:
+                if page.selected == 0 and key == "enter":
+                    self.play_all(tracks)
+                elif 0 < page.selected < rows:
+                    self.track_key(key, tracks[page.selected - 1])
+            return
+        if not page.items:
             return
         page.selected = moved(page.selected, key, len(page.items))
         if key == "space":
@@ -303,6 +389,8 @@ class App:
             label, action = item
             if action == "settings":
                 self.library.append(Page("设置", "settings", SETTINGS))
+            elif action == "hide-unplayable":
+                self.toggle_hidden_tracks()
             elif action == "setup":
                 self.open_setup()
             elif action == "login":
@@ -361,7 +449,8 @@ class App:
                 page.items.extend(dict(track, liked=True) if page.liked else track for track in items)
                 page.has_more = len(items) == PLAYLIST_PAGE_SIZE
                 self.notice("" if items else "已到歌单末尾")
-            page.selected = min(page.selected, len(page.items))
+            shown = len(self.visible_tracks(page.items))
+            page.selected = min(page.selected, max(0, shown + page.has_more))
 
         def failed(error):
             if self.library[-1] is page:
@@ -383,6 +472,7 @@ class App:
             self.library = [Page("歌单", "menu", LIBRARY)]
             self.search = Search()
             self.tab, self.login_completed = 0, False
+            self.clear_account()
             self.request_login()
 
         def failed(error):
@@ -418,11 +508,17 @@ class App:
         if not playable(track):
             self.notice("这首歌暂不可播放")
             return
-        if "logout" in self.jobs:
+        if "logout" in self.jobs or "play" in self.jobs:
             return
-        origin, volume = self.tab, self.player.volume
+        volume = self.player.volume
+        self.pending_track = track
+        self.lyrics_visible = False
+        self.show_artwork(track)
+        if switch:
+            self.tab = 2
 
         def done(_result):
+            self.pending_track = None
             if previous:
                 self.player.history.pop()
             self.player.jump(track, remaining, remember=not previous)
@@ -430,18 +526,23 @@ class App:
             self.queue_selection = 0
             self.lyrics_visible = False
             self.notice("")
-            if switch and self.tab == origin:
-                self.tab = 2
+            if self.player.volume != volume:
+                self.submit("control", partial(self.client.control, "volume", str(self.player.volume)), lambda _: None)
 
         def failed(error):
+            self.pending_track = None
+            if self.player.current:
+                self.show_artwork(self.player.current)
+            else:
+                self.player.current = track
+                self.player.status = "failed"
             self.error(error)
             if automatic and not getattr(error, "reauth", False):
                 self.player.upcoming = remaining
                 self.advance()
 
-        if "play" not in self.jobs:
-            self.notice("正在载入歌曲…", seconds=60)
-            self.submit("play", partial(self.client.play, track, volume=volume), done, failed)
+        self.notice("")
+        self.submit("play", partial(self.client.play, track, volume=volume), done, failed)
 
     def position_changed(self, state):
         if "play" in self.jobs or "control" in self.jobs:
@@ -499,6 +600,9 @@ class App:
         player = self.player
         if self.overlay:
             self.scene_key(key)
+        elif self.pending_track:
+            if key in MOVES:
+                player.volume = max(0, min(100, player.volume - 5 * MOVES[key]))
         elif key == "space":
             self.toggle_playback()
         elif key in PREVIOUS:
@@ -614,35 +718,43 @@ class App:
             return dict(heading=search.query + "▏" if search.query else "输入歌名或歌手全拼",
                         detail="正在搜索…" if self.has_search_job() else "例如 qilixiang 或 linjunjie",
                         footer="Enter 搜索 · Tab 换页")
-        return dict(heading=search.query, rows=track_rows(search.tracks), selected=search.selected,
-                    footer="F/X 选择 · Enter 播放 · A 入队")
+        tracks = self.visible_tracks(search.tracks)
+        return dict(heading=search.query, rows=track_rows(tracks), selected=search.selected,
+                    detail="" if tracks else "没有可播放的结果",
+                    footer="F/X 选择 · Enter 播放 · A 入队" if tracks else "Esc 修改关键词")
 
     def list_view(self, page):
         if page.kind == "tracks":
             play_label = "播放已加载曲目" if page.has_more else "播放全部"
-            rows = [(play_label, "")] + track_rows(page.items) if page.items else []
+            tracks = self.visible_tracks(page.items)
+            rows = [(play_label, "")] + track_rows(tracks) if tracks else []
             if page.has_more:
                 rows.append(("加载更多", ""))
-            detail = "" if rows else "暂无歌曲"
+            detail = "" if tracks else "没有可播放的歌曲" if page.items else "暂无歌曲"
         elif page.kind == "playlists":
             rows = [(item.get("name") or "未命名歌单", "") for item in page.items]
             detail = "" if rows else "暂无歌单"
         else:
-            rows = [(item[0], "") for item in page.items]
+            rows = [(label, ("开启" if self.hide_unplayable else "关闭") if action == "hide-unplayable" else "")
+                    for label, action in page.items]
             detail = self.account if page.kind == "settings" else ""
         if "library" in self.jobs:
             detail = "正在加载…"
-        return dict(heading=page.title, detail=detail, rows=rows, selected=page.selected,
+        view = dict(heading=page.title, detail=detail, rows=rows, selected=page.selected,
                     footer="F/X 选择 · Enter 打开 · Esc 返回")
+        if page.kind == "menu":
+            view.update(profile_name=self.account or "已登录", avatar=self.avatar)
+        return view
 
     def player_view(self):
         player = self.player
         if self.overlay:
             return self.list_view(self.overlay)
-        if not player.current:
+        track = self.pending_track or player.current
+        if not track:
             return dict(heading="还没有播放歌曲", detail=f"音量 {player.volume}", footer="F/X 音量 · Tab 换页")
-        title = player.current.get("name") or "未知歌曲"
-        if self.lyrics_visible:
+        title = track.get("name") or "未知歌曲"
+        if self.lyrics_visible and not self.pending_track:
             lyrics = self.lyric_cache.get(player.current["id"])
             if not lyrics:
                 detail = "正在加载…" if f"lyric-{player.current['id']}" in self.jobs else "暂无歌词"
@@ -652,13 +764,11 @@ class App:
                 active = 0
             return dict(heading=title, rows=[(line, "") for _, line in lyrics],
                         selected=active, footer="Esc 返回")
-        state = {"idle": "", "starting": "载入中", "playing": "播放中", "paused": "已暂停",
-                 "ended": "已播完", "failed": "播放失败"}[player.status]
-        time_text = f"{clock_label(player.position)} / {clock_label(player.duration)}" if player.duration else ""
-        return dict(heading=title, detail=artists(player.current),
-                    rows=[(f"{state}  ·  {MODES[player.mode]}  ·  音量 {player.volume}", time_text)],
-                    progress=(player.position, player.duration),
-                    footer="Z/C 切歌 · F/X 音量 · S 模式 · L 词 · H 收藏 · V 场景")
+        progress = (0, 0) if self.pending_track else (player.position, player.duration)
+        status = "starting" if self.pending_track else player.status
+        return dict(heading=title, detail=artists(track), progress=progress,
+                    playback={"status": status, "mode": MODES[player.mode], "volume": player.volume,
+                              "liked": bool(track.get("liked")), "artwork": self.artwork})
 
     def queue_view(self):
         player = self.player
@@ -670,6 +780,8 @@ class App:
 
     def close(self):
         self.close_web()
+        self.images.shutdown(wait=False, cancel_futures=True)
+        self.audio.shutdown(wait=True, cancel_futures=True)
         self.client.cancel_pending()
         self.pool.shutdown(wait=True, cancel_futures=True)
         if self.player.current or "play" in self.jobs:
@@ -681,8 +793,3 @@ class App:
 
 def moved(index, key, size):
     return max(0, min(size - 1, index + MOVES.get(key, 0)))
-
-
-def clock_label(value):
-    minutes, seconds = divmod(int(value), 60)
-    return f"{minutes}:{seconds:02d}"

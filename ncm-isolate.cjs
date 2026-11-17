@@ -47,6 +47,7 @@ if (mediaFile && process.argv[2] === 'play') {
     }
     const data = await response.json().catch(() => null);
     if (response.status >= 500) return exit({network: true});
-    return exit({url: data?.code === 200 ? data.data?.playUrl : undefined});
+    const media = data?.code === 200 ? data.data : null;
+    return exit({url: media?.playUrl, expiresAt: media?.playUrlExpireTime});
   };
 }

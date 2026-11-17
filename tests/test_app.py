@@ -1,3 +1,5 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from app import App
@@ -19,7 +21,9 @@ class FakeClient:
         return True
 
     def login_status(self):
-        return {"success": True, "nickname": "测试"}
+        return {"success": True, "user": {"nickname": "测试帐号"}}
+
+    account_status = login_status
 
     def search(self, text):
         self.queries.append(text)
@@ -92,6 +96,55 @@ class AppTest(unittest.TestCase):
         self.wait("play")
         self.assertEqual(self.client.plays, ["one", "two"])
         self.assertEqual(self.app.player.upcoming, [])
+
+    def test_enter_shows_loading_playback_before_worker_result(self):
+        for key in "qilixiang":
+            self.key(key)
+        self.key("enter")
+        self.wait(f"search-{self.app.search.generation}")
+        self.key("enter")
+        self.assertEqual(self.app.tab, 2)
+        self.assertEqual(self.app.view()["heading"], "七里香")
+        self.assertEqual(self.app.view()["playback"]["status"], "starting")
+        self.assertIsNone(self.app.player.current)
+        self.key("tab")
+        self.wait("play")
+        self.assertEqual(self.app.tab, 3)
+        self.assertEqual(self.app.player.current["id"], "one")
+
+    def test_hide_unplayable_is_saved_and_pagination_uses_raw_offset(self):
+        with TemporaryDirectory() as temporary:
+            self.app.settings_path = Path(temporary) / "settings.json"
+            self.key("tab")
+            self.assertEqual(self.app.view()["profile_name"], "测试帐号")
+            for _ in range(3):
+                self.key("x")
+            self.key("enter")
+            self.key("enter")
+            self.assertTrue(self.app.hide_unplayable)
+            self.assertIn(("隐藏不可播放曲目", "开启"), self.app.view()["rows"])
+            saved = App(self.client, settings_path=self.app.settings_path)
+            self.addCleanup(saved.close)
+            self.assertTrue(saved.hide_unplayable)
+            self.key("esc")
+            for _ in range(3):
+                self.key("f")
+            offsets = []
+
+            def paged(_collection, offset=0):
+                offsets.append(offset)
+                if offset:
+                    return [song(id="playable")]
+                return [dict(song(id=str(index)), playFlag=False) for index in range(PLAYLIST_PAGE_SIZE)]
+
+            self.client.tracks = paged
+            self.key("enter")
+            self.wait("library")
+            self.assertEqual(self.app.view()["rows"], [("加载更多", "")])
+            self.key("enter")
+            self.wait("library")
+            self.assertEqual(offsets, [0, PLAYLIST_PAGE_SIZE])
+            self.assertEqual(self.app.view()["rows"][-1][0], "七里香")
 
     def test_volume_can_be_set_before_playback(self):
         self.key("tab")

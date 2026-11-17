@@ -2,6 +2,7 @@ import http.client
 import json
 from pathlib import Path
 import shutil
+import time
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -84,3 +85,34 @@ class BackendSetupTest(unittest.TestCase):
             with self.assertRaises(NeteaseError):
                 backend.configure("test-app", "test\nkey", is_active=lambda: False)
             self.assertEqual(backend._current.resolve(), active)
+
+
+class MediaCacheTest(unittest.TestCase):
+    def test_replay_reuses_an_unexpired_authorized_address(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backend = Netease(root, "fake-cli")
+            backend._current.mkdir()
+            backend._runtime = lambda _home: root
+            requests = []
+            played = []
+
+            def resolve(*args, media_file, **_kwargs):
+                requests.append(args)
+                media_file.write_text(json.dumps({
+                    "url": "https://p2.music.126.net/test",
+                    "expiresAt": time.time() * 1000 + 60000
+                }))
+
+            backend._run = resolve
+            backend._play_url = lambda _home, url, volume: played.append((url, volume))
+            song = {"id": "test", "originalId": "123"}
+            backend.play(song)
+            backend.play(song, volume=55)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual([volume for _, volume in played], [75, 55])
+
+            url, _expiry = backend._media_urls[("test", "123")]
+            backend._media_urls[("test", "123")] = (url, 0)
+            backend.play(song)
+            self.assertEqual(len(requests), 2)

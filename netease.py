@@ -1,4 +1,5 @@
 """Adapter for the official @music163/ncm-cli 0.1.7."""
+from collections import OrderedDict
 import hashlib
 import json
 import os
@@ -37,6 +38,7 @@ class Netease:
         self._pending_login = None
         self._current = self.profile / "current"
         self._player = None
+        self._media_urls = OrderedDict()
 
     def configured(self) -> bool:
         home = self._current
@@ -201,6 +203,7 @@ class Netease:
                 os.replace(link, self._current)
                 committed = True
                 self._pending_login = (time.monotonic(), qr)
+                self._media_urls.clear()
                 if self._player is not None:
                     self._player.close()
                     self._player = None
@@ -227,6 +230,13 @@ class Netease:
                 return pending[1]
             return self._qr(self._run("login", "--background"))
 
+    def account_status(self):
+        try:
+            profile = self._data("user", "info")
+        except NeteaseError:
+            return self.login_status()
+        return {"success": True, "user": profile}
+
     def login_status(self):
         with self._lock:
             result = self._run("login", "--check", allow_failure=True)
@@ -252,6 +262,7 @@ class Netease:
         with self._lock:
             self._run("logout", allow_empty=True)
             self._pending_login = None
+            self._media_urls.clear()
 
     @staticmethod
     def _record(record):
@@ -325,11 +336,21 @@ class Netease:
         if not track.get("id") or not track.get("originalId"):
             raise NeteaseError("这首歌缺少官方播放器需要的歌曲 ID。")
         home = self._current.resolve(strict=True)
+        key = (str(track["id"]), str(track["originalId"]))
+        cached = self._media_urls.pop(key, None)
+        if cached and cached[1] > time.time() * 1000 + 5000:
+            try:
+                self._play_url(home, cached[0], volume)
+            except MpvError:
+                pass
+            else:
+                self._media_urls[key] = cached
+                return
+
         with tempfile.TemporaryDirectory(prefix="media-", dir=self._runtime(home)) as staging:
             media_file = Path(staging) / "response.json"
-            self._run("play", "--song", "--encrypted-id", str(track["id"]),
-                      "--original-id", str(track["originalId"]), allow_empty=True,
-                      media_file=media_file)
+            self._run("play", "--song", "--encrypted-id", key[0], "--original-id", key[1],
+                      allow_empty=True, media_file=media_file)
             payload = self._wait_for_media(media_file)
         url = payload.get("url")
         try:
@@ -339,12 +360,20 @@ class Netease:
                 raise ValueError
         except ValueError:
             raise NeteaseError("网易云音乐没有返回可用播放地址。") from None
-        if self._player is None:
-            self._player = Mpv(self._runtime(home) / "zeromusic-audio.sock", lambda: self._closing)
         try:
-            self._player.play(url, volume)
+            self._play_url(home, url, volume)
         except MpvError as error:
             raise NeteaseError(str(error)) from None
+        expiry = payload.get("expiresAt")
+        if isinstance(expiry, (int, float)) and expiry > time.time() * 1000 + 5000:
+            self._media_urls[key] = (url, expiry)
+            if len(self._media_urls) > 6:
+                self._media_urls.popitem(last=False)
+
+    def _play_url(self, home, url, volume):
+        if self._player is None:
+            self._player = Mpv(self._runtime(home) / "zeromusic-audio.sock", lambda: self._closing)
+        self._player.play(url, volume)
 
     def _wait_for_media(self, media_file):
         end = time.monotonic() + 24
@@ -361,7 +390,8 @@ class Netease:
         raise NeteaseError("网易云音乐播放请求超时，请重试。")
 
     def state(self):
-        return self._player.state() if self._player else {"status": "stopped"}
+        player = self._player
+        return player.state() if player else {"status": "stopped"}
 
     def control(self, command, *args):
         player = self._player

@@ -21,7 +21,7 @@ def artists(track):
 
 def playable(track):
     flag = track.get("playFlag")
-    return bool(track.get("id") and track.get("originalId") and
+    return bool(track.get("id") and track.get("originalId") and track.get("visible") is not False and
                 flag not in (False, "false", "0"))
 
 
