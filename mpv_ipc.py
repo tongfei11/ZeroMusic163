@@ -73,29 +73,36 @@ class Mpv:
                     ["mpv", "--no-config", "--idle=yes", "--no-video", "--really-quiet",
                      "--force-window=no", f"--input-ipc-server={self.address}"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
             except OSError:
                 raise MpvError("无法启动设备播放器。") from None
         self.wait_until(self.ready, 12, "设备播放器启动超时。")
 
-    def play(self, url, volume):
+    def play(self, url, volume, position=0):
         self.start()
         self.command("set_property", "volume", volume)
+        if position > 0:
+            self.command("set_property", "pause", True)
         previous = self.properties("playlist/0/id")["playlist/0/id"]
+        loaded = False
         try:
-            if self.load_file(url):
-                return
+            loaded = self.load_file(url, paused=position > 0)
         except (OSError, ValueError, AttributeError):
             pass
 
         # An IPC disconnect can lose the event even when mpv loaded the song.
-        state = self.properties("playlist/0/id", "idle-active", "time-pos")
-        if (state["idle-active"] is False and state["time-pos"] is not None
-                and state["playlist/0/id"] is not None and state["playlist/0/id"] != previous):
-            return
-        raise MpvError("音频载入失败或超时，请重试。")
+        if not loaded:
+            state = self.properties("playlist/0/id", "idle-active", "time-pos")
+            loaded = (state["idle-active"] is False and state["time-pos"] is not None
+                      and state["playlist/0/id"] is not None and state["playlist/0/id"] != previous)
+        if not loaded:
+            raise MpvError("音频载入失败或超时，请重试。")
+        if position > 0:
+            self.command("seek", position, "absolute+exact")
+            self.command("set_property", "pause", False)
 
-    def load_file(self, url):
+    def load_file(self, url, *, paused=False):
         deadline = time.monotonic() + 18
         entry_id = None
         accepted = loaded = False
@@ -104,7 +111,7 @@ class Mpv:
             client.settimeout(0.5)
             client.connect(str(self.address))
             self.send(client, ("loadfile", url, "replace"), 1)
-            self.send(client, ("set_property", "pause", False), 2)
+            self.send(client, ("set_property", "pause", paused), 2)
             while time.monotonic() < deadline and not self.closing():
                 try:
                     chunk = client.recv(8192)

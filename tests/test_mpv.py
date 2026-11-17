@@ -1,8 +1,11 @@
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from mpv_ipc import Mpv, MpvError
+from playback_resume import load_resume, save_resume
 from player import Player
 
 
@@ -37,6 +40,32 @@ class MpvTest(unittest.TestCase):
                 {"event": "start-file", "playlist_entry_id": 2},
                 {"event": "end-file", "playlist_entry_id": 2, "reason": "error"},
             )
+
+    def test_resume_seeks_before_unpausing(self):
+        self.mpv.start = Mock()
+        self.mpv.properties = Mock(return_value={"playlist/0/id": 1})
+        self.mpv.load_file = Mock(return_value=True)
+        self.mpv.command = Mock()
+        self.mpv.play("http://example.com/song", 60, 41.4)
+        self.mpv.load_file.assert_called_once_with("http://example.com/song", paused=True)
+        self.assertEqual(self.mpv.command.call_args_list, [
+            call("set_property", "volume", 60),
+            call("set_property", "pause", True),
+            call("seek", 41.4, "absolute+exact"),
+            call("set_property", "pause", False),
+        ])
+
+    def test_playback_session_is_replaced_atomically(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "playback.json"
+            self.assertEqual(load_resume(path), {})
+            first = {"track": {"name": "宁夏"}, "position": 41.4}
+            save_resume(path, first)
+            self.assertEqual(load_resume(path), first)
+            with self.assertRaises(ValueError):
+                save_resume(path, {"position": float("nan")})
+            self.assertEqual(load_resume(path), first)
+            self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_missing_ipc_data_does_not_reset_playing_progress(self):
         values = {"idle-active": None, "pause": None, "time-pos": None,

@@ -105,14 +105,14 @@ class MediaCacheTest(unittest.TestCase):
                 }))
 
             backend._run = resolve
-            backend._play_url = lambda _home, url, volume: played.append((url, volume))
+            backend._play_url = lambda _home, url, volume, position: played.append((volume, position))
             song = {"id": "test", "originalId": "123"}
             backend.preload(song)
             self.assertEqual(played, [])
             backend.play(song)
-            backend.play(song, volume=55)
+            backend.play(song, volume=55, position=42)
             self.assertEqual(len(requests), 1)
-            self.assertEqual([volume for _, volume in played], [75, 55])
+            self.assertEqual(played, [(75, 0), (55, 42)])
 
             url, _expiry = backend._media_urls[("test", "123")]
             backend._media_urls[("test", "123")] = (url, 0)

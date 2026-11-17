@@ -231,6 +231,54 @@ class AppTest(unittest.TestCase):
         self.assertEqual(view["playback"]["status"], "idle")
         self.assertEqual(view["progress"], (0, 0))
 
+    def test_close_saves_position_and_reopen_resumes_on_play(self):
+        with TemporaryDirectory() as directory:
+            settings = Path(directory) / "settings.json"
+            first = App(self.client, settings_path=settings)
+            first.player.current = song()
+            first.player.upcoming = [song(id="next")]
+            first.player.status = "playing"
+            self.client.state = lambda: {"status": "playing", "position": 47.5, "duration": 180}
+            first.close()
+            self.assertIn(("stop",), self.client.controls)
+
+            reopened = App(self.client, settings_path=settings)
+            try:
+                reopened.jobs["login-status"][0].result(timeout=2)
+                reopened.tick()
+                self.assertEqual(reopened.view()["progress"], (47.5, 180))
+                self.assertEqual(self.client.plays, [])
+                self.client.play = lambda track, **options: self.client.plays.append((track["id"], options))
+                reopened.key("6", 1)
+                reopened.jobs["play"][0].result(timeout=2)
+                reopened.tick()
+                self.assertEqual(self.client.plays, [("one", {"volume": 75, "position": 47.5})])
+                self.assertEqual(reopened.player.upcoming[0]["id"], "next")
+            finally:
+                reopened.close()
+
+    def test_background_setting_persists_and_worker_continues_queue(self):
+        with TemporaryDirectory() as directory:
+            settings = Path(directory) / "settings.json"
+            first = App(self.client, settings_path=settings)
+            first.toggle_setting("background_playback")
+            first.player.current = song()
+            first.player.upcoming = [song(id="next")]
+            first.player.status = "playing"
+            first.close(keep_playing=True)
+            self.assertNotIn(("stop",), self.client.controls)
+
+            self.client.adopt_playback = lambda: {"status": "stopped"}
+            worker = App(self.client, settings_path=settings, background=True)
+            try:
+                self.assertTrue(worker.background_playback)
+                worker.jobs["play"][0].result(timeout=2)
+                worker.tick()
+                self.assertEqual(self.client.plays, ["next"])
+                self.assertFalse(worker.background_finished)
+            finally:
+                worker.close()
+
     def test_escaped_search_does_not_show_stale_result(self):
         self.key("x")
         self.key("enter")

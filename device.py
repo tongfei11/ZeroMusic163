@@ -67,6 +67,10 @@ ACCENT = "#c92237"
 WHITE = "#ffffff"
 FOOTER_TOP = 151
 TABS = ("搜索", "歌单", "播放", "队列")
+PLAYBACK_TITLE_WIDTH = 193
+PLAYBACK_TITLE_SIZE = 17
+TITLE_SCROLL_SPEED = 20
+TITLE_SCROLL_PAUSE = 1.0
 
 
 @lru_cache(maxsize=32)
@@ -96,6 +100,33 @@ def line(draw, value, x, y, width, size, color=TEXT):
             clipped = clipped[:-1]
         value = clipped + "…"
     draw.text((x, y), value, font=face, fill=color, anchor="lt")
+
+
+@lru_cache(maxsize=32)
+def title_overflow(title):
+    _, _, right, _ = font(PLAYBACK_TITLE_SIZE).getbbox(title, anchor="lt")
+    return max(0, right - PLAYBACK_TITLE_WIDTH)
+
+
+def title_scroll_offset(title, elapsed):
+    overflow = title_overflow(title)
+    if not overflow:
+        return 0
+    travel = overflow / TITLE_SCROLL_SPEED
+    phase = max(0.0, elapsed) % (travel + 2 * TITLE_SCROLL_PAUSE)
+    return min(overflow, max(0, int((phase - TITLE_SCROLL_PAUSE) * TITLE_SCROLL_SPEED)))
+
+
+def draw_playback_title(image, draw, title, offset):
+    x, y = 10, 35
+    face = font(PLAYBACK_TITLE_SIZE)
+    if not title_overflow(title):
+        draw.text((x, y), title, font=face, fill=TEXT, anchor="lt")
+        return
+    height = 21  # The artist name starts at y=56.
+    strip = Image.new("RGB", (PLAYBACK_TITLE_WIDTH, height), BACKGROUND)
+    ImageDraw.Draw(strip).text((-offset, 0), title, font=face, fill=TEXT, anchor="lt")
+    image.paste(strip, (x, y))
 
 
 def details(draw, value, x, y, width, bottom, size=13):
@@ -294,7 +325,7 @@ def draw_transport(draw, playback):
 
 def draw_playback(image, draw, view):
     playback = view["playback"]
-    line(draw, view.get("heading"), 10, 35, 193, 17)
+    draw_playback_title(image, draw, str(view.get("heading") or ""), view.get("title_scroll", 0))
     line(draw, view.get("detail"), 10, 56, 163, 12, MUTED)
     draw_volume(draw, playback.get("volume", 0), 183, 60)
     draw_progress(draw, view.get("progress"), 10, 74, 191)

@@ -3,23 +3,22 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
-import json
 from pathlib import Path
 from random import sample
-from tempfile import NamedTemporaryFile
 from time import monotonic
 
 from artwork import download_thumbnail
 
 from netease import NeteaseError, PLAYLIST_PAGE_SIZE
-from player import MODES, Player, PlaylistTail, artists, lyric_lines, playable, track_rows
+from playback_resume import load_resume, save_resume
+from player import MODES, Player, PlaylistTail, artists, lyric_lines, number, playable, track_rows
 from setup_web import SetupWeb
 
 
 TABS = ("搜索", "歌单", "播放", "队列")
 LIBRARY = [("喜欢的音乐", "favorite"), ("我的歌单", "created"), ("每日推荐", "daily"), ("设置", "settings")]
 SETTINGS = [("隐藏不可播放曲目", "hide-unplayable"), ("修改网页配置", "setup"),
-            ("重新登录", "login"), ("退出登录", "logout")]
+            ("重新登录", "login"), ("退出登录", "logout"), ("后台播放", "background")]
 MOVES = {"f": -1, "up": -1, "x": 1, "down": 1}
 VOLUME = {"s": -5, "volume-down": -5, "d": 5, "volume-up": 5}
 PRELOAD_TRACKS = 3
@@ -52,18 +51,19 @@ class Search:
 
 
 class App:
-    def __init__(self, client, web=SetupWeb, clock=monotonic, settings_path=None):
+    def __init__(self, client, web=SetupWeb, clock=monotonic, settings_path=None, *, background=False):
         self.client, self.web_factory, self.clock = client, web, clock
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ncm")
         self.images = ThreadPoolExecutor(max_workers=1, thread_name_prefix="images")
         self.audio = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio")
         self.settings_path = Path(settings_path) if settings_path else None
-        self.hide_unplayable = False
-        if self.settings_path:
-            try:
-                self.hide_unplayable = json.loads(self.settings_path.read_text()).get("hide_unplayable") is True
-            except (OSError, ValueError, AttributeError):
-                pass
+        self.resume_path = self.settings_path.with_name("playback.json") if self.settings_path else None
+        settings = load_resume(self.settings_path) if self.settings_path else {}
+        self.hide_unplayable = settings.get("hide_unplayable") is True
+        self.background_playback = settings.get("background_playback") is True
+        self.background = background
+        self.resume_data = load_resume(self.resume_path) if self.resume_path else {}
+        self.next_save = self.clock() + 15
         self.jobs = {}
         self.library_loading = None
         self.library_request = None
@@ -87,6 +87,7 @@ class App:
         self.pending_queue = None
         self.player = Player()
         self.track_started_at = 0
+        self.title_started_at = self.clock()
         self.queue_selection = 0
         self.queue_flip = None
         self.queue_advance = None
@@ -135,6 +136,7 @@ class App:
         if self.screen == "setup" and self.web and self.web.saved.is_set():
             self.close_web()
             self.player = Player()
+            self.forget_session()
             self.login_completed = False
             self.clear_account()
             self.request_login()
@@ -147,6 +149,8 @@ class App:
             self.submit("profile", self.client.account_status, self.apply_account, lambda _error: None)
         if self.screen == "ready" and now - self.last_key_at >= 2:
             self.load_playback_extras()
+        if self.screen == "ready" and self.player.current and now >= self.next_save:
+            self.save_session(live=self.player.status in ("starting", "playing", "paused"))
         if now < self.next_poll:
             return
         if self.screen == "login" and self.qr:
@@ -171,6 +175,13 @@ class App:
     def start(self):
         self.screen = "checking"
         if self.client.configured():
+            if self.resume_data.get("live") is True:
+                self.restore_session()
+                if self.should_keep_playing or self.player.status == "paused":
+                    self.screen = "ready"
+            if self.background:
+                self.screen = "ready"
+                return
             self.submit("login-status", self.client.account_status, self.initial_login, self.login_error)
         else:
             self.open_setup()
@@ -178,6 +189,70 @@ class App:
     def initial_login(self, data):
         if not self.finish_login(data):
             self.request_login()
+
+    def restore_session(self):
+        saved, self.resume_data = self.resume_data, {}
+        track = saved.get("track")
+        if not isinstance(track, dict) or not playable(track):
+            return
+        player = self.player
+        player.current = track
+        player.upcoming = restore_queue(saved.get("upcoming"))
+        player.history = [entry for entry in restore_queue(saved.get("history")) if isinstance(entry, dict)]
+        player.mode = saved.get("mode") if saved.get("mode") in (0, 1, 2) else 0
+        player.volume = int(min(100, number(saved.get("volume", 75))))
+        player.position, player.duration = number(saved.get("position")), number(saved.get("duration"))
+        player.status = "resume"
+        self.tab = 2
+        self.title_started_at = self.clock()
+        if not self.background:
+            self.show_artwork(track)
+        if saved.get("live") is True:
+            state = self.client.adopt_playback()
+            if state and state["status"] in ("playing", "paused"):
+                player.apply_status(state)
+            elif state and (saved.get("was_playing") is True or saved.get("continue_queue") is True):
+                player.status = "ended"
+                player.position = player.duration
+                if player.mode == 2:
+                    self.start_track(track, player.upcoming[:])
+                else:
+                    self.advance(automatic=True)
+        if player.status == "resume":
+            self.notice("按 6 继续播放")
+
+    def save_session(self, *, live):
+        self.next_save = self.clock() + 15
+        player = self.player
+        if self.resume_path is None or not player.current:
+            return
+        try:
+            save_resume(self.resume_path, {
+                "track": player.current, "upcoming": [save_queue_entry(entry) for entry in player.upcoming],
+                "history": player.history[-30:], "position": player.position if player.status != "ended" else 0,
+                "duration": player.duration, "mode": player.mode, "volume": player.volume,
+                "live": live, "was_playing": player.status in ("starting", "playing"),
+                "continue_queue": self.queue_advance is not None,
+            })
+        except OSError:
+            self.notice("无法保存播放进度")
+
+    def forget_session(self):
+        self.resume_data = {}
+        self.queue_advance = self.queue_flip = None
+        if self.resume_path:
+            try:
+                self.resume_path.unlink(missing_ok=True)
+            except OSError:
+                self.notice("无法清除上次播放进度")
+
+    @property
+    def should_keep_playing(self):
+        return self.player.status in ("playing", "starting") or self.queue_advance is not None
+
+    @property
+    def background_finished(self):
+        return not (self.should_keep_playing or self.pending_track or self.player.status == "paused")
 
     def finish_login(self, data):
         if not data.get("success"):
@@ -187,6 +262,10 @@ class App:
         self.login_completed = True
         self.screen, self.qr = "ready", ""
         self.notice("")
+        if self.resume_data:
+            self.restore_session()
+        elif self.player.status == "resume":
+            self.notice("按 6 继续播放")
         return True
 
     def apply_account(self, data):
@@ -234,23 +313,18 @@ class App:
     def visible_tracks(self, tracks):
         return [track for track in tracks if playable(track)] if self.hide_unplayable else tracks
 
-    def toggle_hidden_tracks(self):
-        enabled = not self.hide_unplayable
+    def toggle_setting(self, name):
+        settings = {key: getattr(self, key) for key in ("hide_unplayable", "background_playback")}
+        settings[name] = not settings[name]
         if self.settings_path:
-            temporary = None
             try:
-                with NamedTemporaryFile(mode="w", dir=self.settings_path.parent, delete=False) as output:
-                    temporary = Path(output.name)
-                    json.dump({"hide_unplayable": enabled}, output)
-                temporary.replace(self.settings_path)
+                save_resume(self.settings_path, settings)
             except OSError:
                 self.notice("无法保存设置")
                 return
-            finally:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-        self.hide_unplayable = enabled
-        self.search.selected = 0
+        setattr(self, name, settings[name])
+        if name == "hide_unplayable":
+            self.search.selected = 0
 
     def login_error(self, error):
         self.screen, self.qr = "login", ""
@@ -274,6 +348,7 @@ class App:
         if "login" in self.jobs:
             return
         self.screen = "login"
+        self.library_request = self.library_loading = None
         self.login_attempt += 1
         self.qr = ""
         self.notice("")
@@ -429,7 +504,9 @@ class App:
                 self.library_request = self.library_loading = None
                 self.library.append(Page("设置", "settings", SETTINGS))
             elif action == "hide-unplayable":
-                self.toggle_hidden_tracks()
+                self.toggle_setting("hide_unplayable")
+            elif action == "background":
+                self.toggle_setting("background_playback")
             elif action == "setup":
                 self.open_setup()
             elif action == "login":
@@ -530,6 +607,7 @@ class App:
 
         def done(_result):
             self.player = Player()
+            self.forget_session()
             self.library = [Page("歌单", "menu", LIBRARY)]
             self.search = Search()
             self.tab, self.login_completed = 0, False
@@ -584,7 +662,7 @@ class App:
         else:
             action()
 
-    def start_track(self, track, remaining, *, switch=False, previous=False, automatic=False):
+    def start_track(self, track, remaining, *, switch=False, previous=False, automatic=False, position=0):
         if not playable(track):
             self.notice("这首歌暂不可播放")
             return
@@ -594,8 +672,11 @@ class App:
         volume = self.player.volume
         self.pending_track = track
         self.pending_queue = remaining
+        if track is not self.player.current:
+            self.title_started_at = self.clock()
         self.help_visible = False
-        self.show_artwork(track)
+        if not self.background:
+            self.show_artwork(track)
         if switch:
             self.tab = 2
 
@@ -606,28 +687,30 @@ class App:
                 self.player.history.pop()
             self.player.jump(track, remaining, remember=not previous)
             self.player.status = "playing"
+            self.player.position = position
             self.track_started_at, self.next_poll = self.clock(), 0
             self.queue_selection = 0
             self.preload_attempt.clear()
             self.notice("")
+            self.save_session(live=True)
             if self.player.volume != volume:
                 self.submit("control", partial(self.client.control, "volume", str(self.player.volume)), lambda _: None)
 
         def failed(error):
             self.pending_track = None
             self.pending_queue = None
-            if self.player.current:
+            if self.player.current and not self.background:
                 self.show_artwork(self.player.current)
-            else:
+            if not self.player.current:
                 self.player.current = track
                 self.player.status = "failed"
             self.error(error)
             if automatic and not getattr(error, "reauth", False):
                 self.player.upcoming = remaining
-                self.advance()
+                self.advance(automatic=True)
 
         def resolve_and_play():
-            self.submit("play", partial(self.client.play, track, volume=volume), done, failed)
+            self.submit("play", partial(self.client.play, track, **options), done, failed)
 
         def cached_result(played):
             if played:
@@ -636,8 +719,11 @@ class App:
                 resolve_and_play()
 
         self.notice("")
+        options = {"volume": volume}
+        if position:
+            options["position"] = position
         if self.client.is_preloaded(track):
-            self.submit("play", partial(self.client.play_cached, track, volume=volume),
+            self.submit("play", partial(self.client.play_cached, track, **options),
                         cached_result, failed, cached=True)
         else:
             resolve_and_play()
@@ -743,7 +829,7 @@ class App:
                 self.submit("preload", partial(self.client.preload, upcoming),
                             lambda _: None, lambda _error: None)
                 return
-        if self.tab == 2 and not self.help_visible and track_id not in self.lyric_cache:
+        if not self.background and self.tab == 2 and not self.help_visible and track_id not in self.lyric_cache:
             def done(raw):
                 self.lyric_cache[track_id] = lyric_lines(raw)
                 if len(self.lyric_cache) > 8:
@@ -781,8 +867,11 @@ class App:
         player = self.player
         if not player.current or "play" in self.jobs:
             return
-        if player.status in ("ended", "failed"):
-            self.start_track(player.current, player.upcoming[:])
+        if player.status in ("ended", "failed", "resume"):
+            position = player.position if player.status == "resume" else 0
+            if player.duration and position >= player.duration - 2:
+                position = 0
+            self.start_track(player.current, player.upcoming[:], position=position)
         elif player.status == "playing":
             self.submit("control", partial(self.client.control, "pause"),
                         lambda _: setattr(player, "status", "paused"))
@@ -811,8 +900,8 @@ class App:
             self.shuffle_next.clear()
         elif key == "8" and player.current:
             self.toggle_like(player.current)
-        elif key == "enter" and player.current and player.status == "failed":
-            self.start_track(player.current, player.upcoming[:])
+        elif key == "enter" and player.current and player.status in ("failed", "resume"):
+            self.toggle_playback()
 
     def adjust_volume(self, step):
         player = self.player
@@ -963,7 +1052,8 @@ class App:
             rows = [(item.get("name") or "未命名歌单", "") for item in page.items]
             detail = "" if rows else "暂无歌单"
         else:
-            rows = [(label, ("开启" if self.hide_unplayable else "关闭") if action == "hide-unplayable" else "")
+            settings = {"hide-unplayable": self.hide_unplayable, "background": self.background_playback}
+            rows = [(label, ("开启" if settings[action] else "关闭") if action in settings else "")
                     for label, action in page.items]
             detail = self.account if page.kind == "settings" else ""
         footer = "Enter 打开 · A 入队 · Esc 返回" if page.kind in ("menu", "playlists") else \
@@ -982,7 +1072,8 @@ class App:
             return dict(heading="播放按键", rows=PLAYBACK_HELP, footer="短按 Esc 返回")
         track = self.pending_track or player.current
         title = (track.get("name") or "未知歌曲") if track else "还没有播放歌曲"
-        progress = (0, 0) if self.pending_track else (player.position, player.duration)
+        progress = (0, 0) if self.pending_track and self.pending_track is not player.current else (
+            player.position, player.duration)
         status = "starting" if self.pending_track else player.status
         info = {"status": status, "mode": MODES[player.mode], "volume": player.volume,
                 "liked": bool(track and track.get("liked")), "artwork": self.artwork}
@@ -999,7 +1090,7 @@ class App:
                     cursor = max((i for i, (start, _) in enumerate(lyrics) if start <= player.position), default=0)
                 preview = [line for _, line in lyrics[cursor:cursor + 2]]
         return dict(heading=title, detail=artists(track) if track else "", progress=progress,
-                    playback=info, lyric_preview=preview)
+                    playback=info, lyric_preview=preview, title_scroll=self.clock() - self.title_started_at)
 
     def queue_view(self):
         player = self.player
@@ -1018,18 +1109,57 @@ class App:
         return dict(heading="播放队列", detail=detail, rows=rows, selected=selected - start,
                     footer="Z/C 翻页 · Enter 播放 · R 移除")
 
-    def close(self):
+    def close(self, *, keep_playing=False):
         self.close_web()
         self.images.shutdown(wait=False, cancel_futures=True)
         self.client.cancel_pending()
         self.audio.shutdown(wait=True, cancel_futures=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
-        if self.player.current or "play" in self.jobs:
+        player = self.player
+        if player.current or "play" in self.jobs:
             try:
-                self.client.control("stop")
+                if "play" in self.jobs:
+                    future = self.jobs["play"][0]
+                    if self.pending_track and not future.cancelled() and future.exception() is None:
+                        if future.result() is not False:
+                            player.jump(self.pending_track, self.pending_queue)
+                if player.status in ("starting", "playing", "paused"):
+                    ended = player.apply_status(self.client.state())
+                    if ended and keep_playing:
+                        self.queue_advance = True, False
             except NeteaseError:
                 pass
+            self.save_session(live=keep_playing)
+            if not keep_playing:
+                try:
+                    self.client.control("stop")
+                except NeteaseError:
+                    pass
 
 
 def moved(index, key, size):
     return max(0, min(size - 1, index + MOVES.get(key, 0)))
+
+
+def save_queue_entry(entry):
+    if isinstance(entry, PlaylistTail):
+        return {"tail": {"title": entry.title, "playlist_id": entry.playlist_id, "offset": entry.offset,
+                         "previous_ids": entry.previous_ids, "liked": entry.liked}}
+    return entry
+
+
+def restore_queue(entries):
+    queue = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        if playable(entry):
+            queue.append(entry)
+            continue
+        tail = entry.get("tail")
+        if isinstance(tail, dict) and isinstance(tail.get("offset"), int) and tail["offset"] >= 0:
+            ids = tail.get("previous_ids")
+            if isinstance(ids, list) and tail.get("playlist_id") and isinstance(tail.get("title"), str):
+                queue.append(PlaylistTail(tail["title"], tail["playlist_id"], tail["offset"], tuple(ids),
+                                          tail.get("liked") is True))
+    return queue

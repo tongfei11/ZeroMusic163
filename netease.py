@@ -360,29 +360,29 @@ class Netease:
         if self._cached_media(key) is None:
             self._fetch_media(home, key)
 
-    def _try_cached_play(self, home, key, volume):
+    def _try_cached_play(self, home, key, volume, position):
         url = self._cached_media(key)
         if url is None:
             return False
         try:
-            self._play_url(home, url, volume)
+            self._play_url(home, url, volume, position)
         except MpvError:
             with self._media_lock:
                 self._media_urls.pop(key, None)
             return False
         return True
 
-    def play_cached(self, track, *, volume=75):
+    def play_cached(self, track, *, volume=75, position=0):
         home, key = self._track_location(track)
-        return self._try_cached_play(home, key, volume)
+        return self._try_cached_play(home, key, volume, position)
 
-    def play(self, track, *, volume=75):
+    def play(self, track, *, volume=75, position=0):
         home, key = self._track_location(track)
-        if self._try_cached_play(home, key, volume):
+        if self._try_cached_play(home, key, volume, position):
             return
         url = self._fetch_media(home, key)
         try:
-            self._play_url(home, url, volume)
+            self._play_url(home, url, volume, position)
         except MpvError as error:
             with self._media_lock:
                 self._media_urls.pop(key, None)
@@ -410,10 +410,22 @@ class Netease:
                     self._media_urls.popitem(last=False)
         return url
 
-    def _play_url(self, home, url, volume):
+    def _play_url(self, home, url, volume, position):
         if self._player is None:
             self._player = Mpv(self._runtime(home) / "zeromusic-audio.sock", lambda: self._closing)
-        self._player.play(url, volume)
+        self._player.play(url, volume, position)
+
+    def adopt_playback(self):
+        try:
+            home = self._current.resolve(strict=True)
+            player = Mpv(self._runtime(home) / "zeromusic-audio.sock", lambda: self._closing)
+        except (OSError, NeteaseError):
+            return None
+        state = player.state()
+        if state["status"] == "unknown":
+            return None
+        self._player = player
+        return state
 
     def _wait_for_media(self, media_file):
         end = time.monotonic() + 24
