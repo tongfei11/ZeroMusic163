@@ -71,6 +71,7 @@ class Mpv:
             try:
                 self.process = subprocess.Popen(
                     ["mpv", "--no-config", "--idle=yes", "--no-video", "--really-quiet",
+                     "--audio-client-name=ZeroMusic163", "--pipewire-buffer=120",
                      "--force-window=no", f"--input-ipc-server={self.address}"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True,

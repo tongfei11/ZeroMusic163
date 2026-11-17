@@ -37,11 +37,12 @@ class Device:
         self.write_frame()
 
     def show_title(self, title, offset):
-        strip = rgb565(playback_title_strip(title, offset))
+        stride, strip = playback_title_pixels(title)
         width = PLAYBACK_TITLE_WIDTH * 2
         for row in range(PLAYBACK_TITLE_HEIGHT):
             start = ((PLAYBACK_TITLE_Y + row) * SIZE[0] + PLAYBACK_TITLE_X) * 2
-            self.pixels[start:start + width] = strip[row * width:(row + 1) * width]
+            source = row * stride + offset * 2
+            self.pixels[start:start + width] = strip[source:source + width]
         self.write_frame()
 
     def write_frame(self):
@@ -151,6 +152,12 @@ def playback_title_image(title):
 
 def playback_title_strip(title, offset):
     return playback_title_image(title).crop((offset, 0, offset + PLAYBACK_TITLE_WIDTH, PLAYBACK_TITLE_HEIGHT))
+
+
+@lru_cache(maxsize=1)
+def playback_title_pixels(title):
+    image = playback_title_image(title)
+    return image.width * 2, rgb565(image)
 
 
 def details(draw, value, x, y, width, bottom, size=13):
