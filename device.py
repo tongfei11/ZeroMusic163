@@ -472,7 +472,7 @@ def toast_image(message, progress):
     if progress is not None:
         left, right = 16, width - 17
         top = height - 16
-        draw.rounded_rectangle((left, top, right, top + 4), radius=2, fill=(255, 255, 255, 85))
+        draw.rounded_rectangle((left, top, right, top + 4), radius=2, fill="#555555")
         filled = round((right - left + 1) * progress)
         if filled:
             draw.rounded_rectangle((left, top, left + filled - 1, top + 4), radius=2, fill=WHITE)

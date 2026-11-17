@@ -271,8 +271,6 @@ class App:
             if saved.get("live") is True and isinstance(retry.get("delay"), (int, float)):
                 self.play_retry.at = self.clock() + min(30, number(retry["delay"]))
             self.notice("等待网络恢复 · 6 重试 · Esc 取消", seconds=300)
-        if player.status == "resume":
-            self.notice("按 6 继续播放")
 
     def save_session(self, *, live):
         self.next_save = self.clock() + 15
@@ -328,8 +326,6 @@ class App:
         self.notice("")
         if self.resume_data:
             self.restore_session()
-        elif self.player.status == "resume":
-            self.notice("按 6 继续播放")
         return True
 
     def apply_account(self, data):

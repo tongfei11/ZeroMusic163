@@ -11,11 +11,15 @@ class PlaybackTitleTest(unittest.TestCase):
         rows = toast_lines(message)
         self.assertGreater(len(rows), 1)
         self.assertEqual("".join(rows), message)
-        empty = toast_image("继续按住 Esc 退出", 0)
-        filled = toast_image("继续按住 Esc 退出", 0.5)
+        toast = toast_image("继续按住 Esc 退出", 0)
+        empty = render({"exit_progress": 0})
+        filled = render({"exit_progress": 0.5})
         self.assertEqual(empty.size, filled.size)
-        self.assertEqual(filled.getpixel((30, filled.height - 14)), (255, 255, 255, 255))
-        self.assertEqual(empty.getpixel((30, empty.height - 14)), (255, 255, 255, 85))
+        left = (empty.width - toast.width) // 2
+        y = (empty.height + toast.height) // 2 - 14
+        self.assertEqual(filled.getpixel((left + 30, y)), (255, 255, 255))
+        self.assertEqual(empty.getpixel((left + 30, y)), (85, 85, 85))
+        self.assertEqual(filled.getpixel((left + toast.width - 30, y)), (85, 85, 85))
 
     def test_framebuffer_color_encoding(self):
         image = Image.new("RGB", (4, 1))
