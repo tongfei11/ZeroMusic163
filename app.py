@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from time import monotonic
 
-from netease import NeteaseError
+from netease import NeteaseError, PLAYLIST_PAGE_SIZE
 from player import MODES, Player, artists, lyric_lines, playable, track_rows
 from setup_web import SetupWeb
 
@@ -24,6 +24,9 @@ class Page:
     kind: str
     items: list
     selected: int = 0
+    playlist_id: str = ""
+    has_more: bool = False
+    liked: bool = False
 
 
 @dataclass
@@ -59,7 +62,6 @@ class App:
         self.lyrics_visible, self.lyric_cache = False, {}
         self.next_poll = 0
         self.notice_text, self.notice_until = "", 0
-        self.retry = None
         self.start()
 
     def submit(self, key, action, success, failure=None):
@@ -203,11 +205,6 @@ class App:
         if key == "tab":
             self.tab = (self.tab + 1) % len(TABS)
             return
-        if key == "enter" and self.retry and self.retry[0] == self.tab:
-            _, action = self.retry
-            self.retry = None
-            action()
-            return
         if self.tab == 0:
             self.search_key(key)
         elif self.tab == 1:
@@ -226,7 +223,6 @@ class App:
             self.qr = ""
             self.screen = "ready" if self.login_completed else "signed-out"
         elif self.screen == "ready":
-            self.retry = None
             if self.confirmation:
                 self.confirmation = None
             elif self.tab == 0 and (not self.search.editing or self.has_search_job()):
@@ -262,7 +258,6 @@ class App:
 
     def search_edited(self):
         self.search.generation += 1
-        self.retry = None
         self.notice("")
 
     def request_search(self):
@@ -286,65 +281,93 @@ class App:
     def library_key(self, key, page):
         if not page.items:
             return
-        size = len(page.items) + (page.kind == "tracks")
-        page.selected = moved(page.selected, key, size)
         if page.kind == "tracks":
+            page.selected = moved(page.selected, key, len(page.items) + 1 + page.has_more)
             if page.selected == 0 and key == "enter":
                 self.play_all(page.items)
+            elif page.has_more and page.selected == len(page.items) + 1:
+                if key == "enter":
+                    self.load_more_tracks(page)
             elif page.selected > 0:
                 self.track_key(key, page.items[page.selected - 1])
             return
+        page.selected = moved(page.selected, key, len(page.items))
         if key == "space":
             self.toggle_playback()
         if key != "enter":
             return
         item = page.items[page.selected]
         if page.kind == "playlists":
-            self.load_tracks(item.get("name") or "歌单", partial(self.client.tracks, item["id"]), page)
-            return
-        label, action = item
-        if action == "settings":
-            self.library.append(Page("设置", "settings", SETTINGS))
-        elif action == "setup":
-            self.open_setup()
-        elif action == "login":
-            self.confirmation = ["重新扫码登录？", self.do_logout, 0]
-        elif action == "logout":
-            self.confirmation = ["退出登录并停止播放？", self.do_logout, 0]
-        elif action == "created":
-            self.load_playlists(page)
+            self.open_list(partial(self.playlist_page, item.get("name") or "歌单", item["id"]), page)
         else:
-            self.load_tracks(label, partial(self.fetch_tracks, action), page)
+            label, action = item
+            if action == "settings":
+                self.library.append(Page("设置", "settings", SETTINGS))
+            elif action == "setup":
+                self.open_setup()
+            elif action == "login":
+                self.confirmation = ["重新扫码登录？", self.do_logout, 0]
+            elif action == "logout":
+                self.confirmation = ["退出登录并停止播放？", self.do_logout, 0]
+            else:
+                self.open_list(partial(self.collection_page, label, action), page)
 
-    def fetch_tracks(self, kind):
+    def collection_page(self, title, kind):
         items = self.client.library(kind)
+        if kind == "created":
+            combined = items + self.client.library("collected")
+            return Page(title, "playlists",
+                        list({item["id"]: item for item in combined if item.get("id")}.values()))
         if kind == "favorite" and items:
-            return [dict(track, liked=True) for track in self.client.tracks(items[0]["id"])]
-        return items
+            return self.playlist_page(title, items[0]["id"], liked=True)
+        return Page(title, "tracks", items)
 
-    def load_playlists(self, page):
-        def fetch():
-            combined = self.client.library("created") + self.client.library("collected")
-            return list({item["id"]: item for item in combined if item.get("id")}.values())
+    def playlist_page(self, title, playlist_id, liked=False):
+        items = self.client.tracks(playlist_id)
+        if liked:
+            items = [dict(track, liked=True) for track in items]
+        return Page(title, "tracks", items, playlist_id=playlist_id,
+                    has_more=len(items) == PLAYLIST_PAGE_SIZE, liked=liked)
 
-        self.load_list("我的歌单", "playlists", fetch, page)
+    def open_list(self, fetch, parent):
+        selected = parent.selected
 
-    def load_tracks(self, title, fetch, page):
-        self.load_list(title, "tracks", fetch, page)
+        def still_selected():
+            return self.library[-1] is parent and parent.selected == selected
 
-    def load_list(self, title, kind, fetch, page):
-        origin = self.tab
+        def done(page):
+            if still_selected():
+                self.library.append(page)
+                self.notice("")
+
+        def failed(error):
+            if still_selected():
+                self.error(error)
+
+        self.submit("library", fetch, done, failed)
+
+    def load_more_tracks(self, page):
+        offset = len(page.items)
 
         def done(items):
-            if self.library[-1] is page:
-                self.library.append(Page(title, kind, items, selected=0))
+            if self.library[-1] is not page:
+                return
+            if items and [track.get("id") for track in items] == [
+                track.get("id") for track in page.items[-len(items):]
+            ]:
+                page.has_more = False
+                self.notice("已到歌单末尾")
+            else:
+                page.items.extend(dict(track, liked=True) if page.liked else track for track in items)
+                page.has_more = len(items) == PLAYLIST_PAGE_SIZE
+                self.notice("" if items else "已到歌单末尾")
+            page.selected = min(page.selected, len(page.items))
 
         def failed(error):
             if self.library[-1] is page:
                 self.error(error)
-                self.retry = (origin, partial(self.load_list, title, kind, fetch, page))
 
-        self.submit("library", fetch, done, failed)
+        self.submit("library", partial(self.client.tracks, page.playlist_id, offset), done, failed)
 
     def do_logout(self):
         self.screen = "checking"
@@ -492,10 +515,13 @@ class App:
             self.previous_track()
         elif key in NEXT:
             self.advance()
-        elif key in MOVES and player.current:
+        elif key in MOVES:
             volume = max(0, min(100, player.volume - 5 * MOVES[key]))
-            self.submit("control", partial(self.client.control, "volume", str(volume)),
-                        lambda _: setattr(player, "volume", volume))
+            if player.status in ("idle", "ended", "failed"):
+                player.volume = volume
+            else:
+                self.submit("control", partial(self.client.control, "volume", str(volume)),
+                            lambda _: setattr(player, "volume", volume))
         elif key == "s":
             player.mode = (player.mode + 1) % len(MODES)
         elif key == "l":
@@ -535,10 +561,7 @@ class App:
             self.overlay = None
             self.tab = 1
             self.library = [Page("歌单", "menu", LIBRARY)]
-            if kind == "created":
-                self.load_playlists(self.library[-1])
-            else:
-                self.load_tracks(label, partial(self.fetch_tracks, kind), self.library[-1])
+            self.open_list(partial(self.collection_page, label, kind), self.library[-1])
 
     def queue_key(self, key):
         player = self.player
@@ -606,7 +629,10 @@ class App:
 
     def list_view(self, page):
         if page.kind == "tracks":
-            rows = [("播放全部", "")] + track_rows(page.items) if page.items else []
+            play_label = "播放已加载曲目" if page.has_more else "播放全部"
+            rows = [(play_label, "")] + track_rows(page.items) if page.items else []
+            if page.has_more:
+                rows.append(("加载更多", ""))
             detail = "" if rows else "暂无歌曲"
         elif page.kind == "playlists":
             rows = [(item.get("name") or "未命名歌单", "") for item in page.items]
@@ -624,7 +650,7 @@ class App:
         if self.overlay:
             return self.list_view(self.overlay)
         if not player.current:
-            return dict(heading="还没有播放歌曲", footer="Tab 换页")
+            return dict(heading="还没有播放歌曲", detail=f"音量 {player.volume}", footer="F/X 音量 · Tab 换页")
         title = player.current.get("name") or "未知歌曲"
         if self.lyrics_visible:
             lyrics = self.lyric_cache.get(player.current["id"])

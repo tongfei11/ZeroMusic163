@@ -12,6 +12,9 @@ import time
 from urllib.parse import urlsplit
 
 
+PLAYLIST_PAGE_SIZE = 30
+
+
 class NeteaseError(Exception):
     """A user-readable error which never includes raw CLI output."""
 
@@ -138,6 +141,8 @@ class Netease:
         for terms, user_message in (
             (("mpv not found", "未安装 mpv", "找不到 mpv", "mpv 未安装"), "找不到 mpv，请检查安装。"),
             (("请求总量超限", "限流"), "网易云音乐请求次数已达上限。"),
+            (("fetch failed", "ECONNRESET", "ENOTFOUND", "HTTP 502", "HTTP 503", "HTTP 504"),
+             "连接网易云音乐失败，按 Enter 重试。"),
             (("匿名登录失败", "签名失败", "凭证无效"), "网易云音乐未能验证应用凭据，请检查 App ID、Private Key 和网络。"),
         ):
             if any(term in message for term in terms):
@@ -291,21 +296,11 @@ class Netease:
             return self._records("playlist", kind)
         raise NeteaseError("未知的音乐库类型。")
 
-    def tracks(self, playlist_id):
-        tracks = []
-        previous_page = None
-        limit = 50
-        while True:
-            page = self._records(
-                "playlist", "tracks", f"--playlistId={playlist_id}",
-                "--limit", str(limit), "--offset", str(len(tracks)),
-            )
-            if page == previous_page:
-                raise NeteaseError("网易云音乐返回了重复的歌单分页。")
-            tracks.extend(page)
-            if len(page) < limit:
-                return tracks
-            previous_page = page
+    def tracks(self, playlist_id, offset=0):
+        return self._records(
+            "playlist", "tracks", f"--playlistId={playlist_id}",
+            "--limit", str(PLAYLIST_PAGE_SIZE), "--offset", str(offset),
+        )
 
     def lyrics(self, song_id):
         data = self._data("song", "lyric", f"--songId={song_id}")

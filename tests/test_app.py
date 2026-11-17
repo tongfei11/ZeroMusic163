@@ -2,6 +2,7 @@ import unittest
 
 from app import App
 from player import Player, lyric_lines
+from netease import NeteaseError, PLAYLIST_PAGE_SIZE
 
 
 def song(name="七里香", id="one"):
@@ -27,7 +28,7 @@ class FakeClient:
     def library(self, kind):
         return [{"name": "喜欢的音乐", "id": "liked"}] if kind == "favorite" else [song()]
 
-    def tracks(self, collection):
+    def tracks(self, collection, offset=0):
         assert collection == "liked"
         return [song()]
 
@@ -92,6 +93,15 @@ class AppTest(unittest.TestCase):
         self.assertEqual(self.client.plays, ["one", "two"])
         self.assertEqual(self.app.player.upcoming, [])
 
+    def test_volume_can_be_set_before_playback(self):
+        self.key("tab")
+        self.key("tab")
+        self.key("x")
+        self.key("x")
+        self.assertEqual(self.app.player.volume, 65)
+        self.assertFalse(self.client.controls)
+        self.assertEqual(self.app.view()["detail"], "音量 65")
+
     def test_escaped_search_does_not_show_stale_result(self):
         self.key("x")
         self.key("enter")
@@ -111,6 +121,55 @@ class AppTest(unittest.TestCase):
         self.assertTrue(page.items[0]["liked"])
         self.key("esc")
         self.assertEqual(len(self.app.library), 1)
+
+    def test_next_page_failure_keeps_existing_tracks(self):
+        seen = []
+
+        def paged(_collection, offset=0):
+            seen.append(offset)
+            if offset:
+                raise NeteaseError("连接网易云音乐失败")
+            return [song(id=str(index)) for index in range(PLAYLIST_PAGE_SIZE)]
+
+        self.client.tracks = paged
+        self.key("tab")
+        self.key("enter")
+        self.wait("library")
+        page = self.app.library[-1]
+        self.assertEqual(seen, [0])
+        self.assertEqual(self.app.view()["rows"][-1][0], "加载更多")
+        page.selected = len(page.items) + 1
+        self.key("enter")
+        with self.assertRaises(NeteaseError):
+            self.app.jobs["library"][0].result(timeout=2)
+        self.app.tick()
+        self.assertEqual(seen, [0, PLAYLIST_PAGE_SIZE])
+        self.assertEqual(len(page.items), PLAYLIST_PAGE_SIZE)
+        self.client.tracks = lambda _collection, _offset: [song(id="more")]
+        self.key("enter")
+        self.wait("library")
+        self.assertEqual(len(page.items), PLAYLIST_PAGE_SIZE + 1)
+        self.assertEqual(self.app.view()["rows"][0][0], "播放全部")
+
+    def test_failed_entry_does_not_override_next_selection(self):
+        initial = self.client.library
+
+        def fail_favorite(kind):
+            if kind == "favorite":
+                raise NeteaseError("连接网易云音乐失败")
+            return initial(kind)
+
+        self.client.library = fail_favorite
+        self.key("tab")
+        self.key("enter")
+        with self.assertRaises(NeteaseError):
+            self.app.jobs["library"][0].result(timeout=2)
+        self.app.tick()
+        self.key("x")
+        self.key("x")
+        self.key("enter")
+        self.wait("library")
+        self.assertEqual(self.app.library[-1].title, "每日推荐")
 
     def test_escape_hold_exits_only_at_threshold(self):
         self.key("esc")
