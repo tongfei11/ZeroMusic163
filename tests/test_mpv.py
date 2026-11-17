@@ -41,6 +41,17 @@ class MpvTest(unittest.TestCase):
                 {"event": "end-file", "playlist_entry_id": 2, "reason": "error"},
             )
 
+    def test_transport_failure_is_retryable_and_bad_format_is_unavailable(self):
+        for failure, retryable in (("network error", True), ("unrecognized file format", False)):
+            with self.subTest(failure=failure), self.assertRaises(MpvError) as caught:
+                self.load_events(
+                    {"request_id": 1, "error": "success"},
+                    {"event": "start-file", "playlist_entry_id": 2},
+                    {"event": "end-file", "playlist_entry_id": 2, "reason": "error", "file_error": failure},
+                )
+            self.assertEqual(caught.exception.retryable, retryable)
+            self.assertEqual(caught.exception.unavailable, not retryable)
+
     def test_resume_seeks_before_unpausing(self):
         self.mpv.start = Mock()
         self.mpv.properties = Mock(return_value={"playlist/0/id": 1})

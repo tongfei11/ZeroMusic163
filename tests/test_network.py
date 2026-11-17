@@ -7,7 +7,7 @@ from threading import Event
 from unittest.mock import patch
 
 from app import App, Page, SETTINGS
-from netease import NeteaseError
+from netease import Netease, NeteaseError
 from test_app import FakeClient, song
 
 
@@ -65,6 +65,33 @@ class NetworkPlaybackTest(unittest.TestCase):
         self.app.tick()
         self.assertNotIn("play", self.app.jobs)
         self.assertIn("6 重试", self.app.notice_text)
+
+    def test_rate_limit_waits_before_retry_and_keeps_the_target(self):
+        error = Netease._error({"code": 429, "message": "服务忙"})
+        self.assertTrue(error.retryable)
+
+        def limited(*_args, **_kwargs):
+            raise error
+
+        self.client.play = limited
+        target = song()
+        self.app.start_track(target, [])
+        self.finish("play")
+        self.assertGreaterEqual(self.app.play_retry.at - self.time, 30)
+        self.assertIs(self.app.play_retry.track, target)
+
+    def test_auth_quota_and_song_restriction_are_not_network_errors(self):
+        auth = Netease._error(None, "HTTP 401: Unauthorized")
+        self.assertTrue(auth.reauth)
+        self.assertFalse(auth.retryable)
+        rights = Netease._error({"message": "歌曲已下架"})
+        self.assertTrue(rights.unavailable)
+        self.assertFalse(rights.retryable)
+        quota = Netease._error({"message": "请求总量超限"})
+        self.assertFalse(quota.retryable)
+        self.assertFalse(quota.reauth)
+        server = Netease._error({"code": 503, "message": "繁忙"})
+        self.assertTrue(server.retryable)
 
     def test_queue_edits_during_recovery_survive_successful_retry(self):
         target, later, added = song(id="next"), song(id="later"), song(id="added")

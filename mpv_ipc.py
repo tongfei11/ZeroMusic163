@@ -7,7 +7,10 @@ import time
 
 
 class MpvError(Exception):
-    pass
+    def __init__(self, message, *, retryable=True, unavailable=False):
+        super().__init__(message)
+        self.retryable = retryable
+        self.unavailable = unavailable
 
 
 class Mpv:
@@ -78,7 +81,7 @@ class Mpv:
                     start_new_session=True,
                 )
             except OSError:
-                raise MpvError("无法启动设备播放器。") from None
+                raise MpvError("无法启动设备播放器。", retryable=False) from None
         self.wait_until(self.ready, 12, "设备播放器启动超时。")
 
     def play(self, url, volume, position=0):
@@ -140,7 +143,11 @@ class Mpv:
                     elif (event_type == "end-file" and entry_id is not None
                           and event.get("playlist_entry_id") == entry_id):
                         if event.get("reason") == "error":
-                            raise MpvError("播放器无法解码这首歌曲。")
+                            failure = str(event.get("file_error", "")).lower()
+                            unsupported = any(term in failure for term in ("unrecognized file format", "unknown format", "no audio"))
+                            if unsupported:
+                                raise MpvError("播放器无法解码这首歌曲。", retryable=False, unavailable=True)
+                            raise MpvError("音频载入失败，请重试。")
                         entry_id = None
                         loaded = False
                     if accepted and loaded:

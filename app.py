@@ -27,7 +27,7 @@ PRELOAD_TRACKS = 3
 PLAYBACK_HELP = [
     ("4 模式 · 5 上一首 · 6 播放 / 暂停", ""),
     ("7 下一首 · 8 收藏 / 取消收藏", ""),
-    ("S / D 调音量 · Tab 换页", ""),
+    ("长按 5 / 7 快退 / 快进 · S / D 音量", ""),
     ("H / Esc 关闭帮助 · 长按 Esc 退出", ""),
 ]
 
@@ -114,6 +114,9 @@ class App:
         self.lyric_cache = {}
         self.like_pending = None
         self.requested_volume = None
+        self.requested_seek = None
+        self.transport_hold = None
+        self.position_epoch = 0
         self.preload_attempt = set()
         self.audio_prefetch_attempt = None
         self.shuffle_next = []
@@ -152,6 +155,7 @@ class App:
                     self.error(error)
             else:
                 success(result)
+        self.update_transport_hold()
         self.run_library_request()
         if self.screen == "ready":
             self.maintain_queue()
@@ -189,9 +193,12 @@ class App:
                         lambda data: self.finish_login(data) if attempt == self.login_attempt else None,
                         lambda _error: None)
         if self.screen == "ready" and self.player.current and self.player.status in ("starting", "playing", "paused", "buffering"):
-            if not {"play", "control", "volume"} & self.jobs.keys():
+            if not {"play", "control", "volume", "seek"} & self.jobs.keys():
                 self.next_poll = now + 0.9
-                self.submit("position", self.client.state, self.position_changed, self.position_error)
+                epoch = self.position_epoch
+                self.submit("position", self.client.state,
+                            lambda state: self.position_changed(state) if epoch == self.position_epoch else None,
+                            self.position_error)
 
     def notice(self, message, seconds=4):
         self.notice_text, self.notice_until = message, self.clock() + seconds
@@ -432,6 +439,8 @@ class App:
                 else:
                     self.back()
             return
+        if key in ("5", "7") and self.handle_transport_hold(key, value):
+            return
         repeatable = key in (*MOVES, "backspace") or (self.tab == 2 and key in VOLUME)
         if not value or (value == 2 and not repeatable):
             return
@@ -455,6 +464,7 @@ class App:
                 self.confirmation = ["清除配置、登录和播放记录？", self.initialize, 0]
             return
         if key == "tab":
+            self.transport_hold = None
             self.help_visible = False
             self.tab = (self.tab + 1) % len(TABS)
             return
@@ -468,6 +478,7 @@ class App:
             self.queue_key(key)
 
     def back(self):
+        self.transport_hold = None
         if self.confirmation:
             self.confirmation = None
         elif self.screen == "setup":
@@ -787,6 +798,9 @@ class App:
             return
         if not retry:
             self.play_retry = None
+        self.transport_hold = None
+        self.requested_seek = None
+        self.position_epoch += 1
         self.queue_advance = self.queue_flip = None
         volume = self.player.volume
         generation = self.account_generation
@@ -834,7 +848,8 @@ class App:
                 self.player.upcoming = remaining
             if error.retryable:
                 self.schedule_playback_retry(track, remaining, position=position,
-                                             previous=previous, automatic=automatic)
+                                             previous=previous, automatic=automatic,
+                                             reason=str(error), min_delay=error.retry_after)
                 return
             self.error(error)
             if automatic and error.unavailable:
@@ -862,7 +877,8 @@ class App:
         else:
             resolve_and_play()
 
-    def schedule_playback_retry(self, track, remaining, *, position=0, previous=False, automatic=False):
+    def schedule_playback_retry(self, track, remaining, *, position=0, previous=False, automatic=False,
+                                reason="播放中断", min_delay=0):
         recovery = self.play_retry
         if recovery is None or recovery.track is not track:
             recovery = PlaybackRetry(track, remaining, position, previous, automatic)
@@ -872,9 +888,9 @@ class App:
             recovery.at = None
             self.notice("重连失败 · 6 重试 · 7 下一首", seconds=300)
         else:
-            delay = min(30, 3 * 2 ** (recovery.attempt - 1))
+            delay = max(min_delay, min(30, 3 * 2 ** (recovery.attempt - 1)))
             recovery.at = self.clock() + delay
-            self.notice(f"连接中断 · {delay}秒后重试 · Esc 取消", seconds=delay + 30)
+            self.notice(f"{reason} · {delay}秒后重试", seconds=delay + 30)
 
     def retry_playback(self):
         recovery = self.play_retry
@@ -885,7 +901,7 @@ class App:
                          previous=recovery.previous, automatic=recovery.automatic, retry=True)
 
     def position_changed(self, state):
-        if {"play", "control", "volume"} & self.jobs.keys():
+        if {"play", "control", "volume", "seek"} & self.jobs.keys():
             return
         if state.get("status") == "unknown":
             if self.position_unknown_since is None:
@@ -1111,6 +1127,70 @@ class App:
             self.toggle_playback()
         elif key == "enter" and player.current and player.status == "buffering":
             self.start_track(player.current, player.upcoming[:], position=player.position)
+
+    def handle_transport_hold(self, key, value):
+        if self.transport_hold and self.transport_hold["key"] == key:
+            if value == 0:
+                held = self.transport_hold
+                if self.clock() - held["started"] >= 0.5 and held["last"] is None:
+                    self.update_transport_hold()
+                self.transport_hold = None
+                if held["last"] is None:
+                    self.play_key(key)
+            return True
+        if (value == 1 and self.screen == "ready" and self.tab == 2
+                and not self.help_visible and not self.confirmation and not self.pending_track):
+            self.transport_hold = {"key": key, "started": self.clock(), "last": None}
+            return True
+        return False
+
+    def update_transport_hold(self):
+        held = self.transport_hold
+        if held is None:
+            return
+        now = self.clock()
+        if self.screen != "ready" or self.tab != 2 or self.pending_track or self.help_visible or self.confirmation:
+            self.transport_hold = None
+            return
+        if now - held["started"] < 0.5 or held["last"] is not None and now - held["last"] < 0.35:
+            return
+        held["last"] = now
+        player = self.player
+        if not player.current or player.status not in ("playing", "paused", "buffering") or not player.duration:
+            self.notice("当前歌曲暂不能定位", seconds=2)
+            return
+        base = player.position if self.requested_seek is None else self.requested_seek
+        step = 5 if held["key"] == "7" else -5
+        self.requested_seek = max(0, min(player.duration - 0.5, base + step))
+        self.position_epoch += 1
+        self.apply_seek()
+
+    def apply_seek(self):
+        target = self.requested_seek
+        if target is None or "seek" in self.jobs:
+            return
+        track, epoch = self.player.current, self.position_epoch
+
+        def action():
+            if self.player.current is track and not self.pending_track:
+                self.client.control("seek", str(target))
+
+        def done(_result):
+            if self.player.current is not track or self.pending_track:
+                return
+            self.player.position = target
+            if epoch == self.position_epoch:
+                self.requested_seek = None
+                self.next_poll = 0
+            else:
+                self.apply_seek()
+
+        def failed(error):
+            if self.player.current is track:
+                self.requested_seek = None
+                self.error(error)
+
+        self.submit("seek", action, done, failed, cached=True)
 
     def adjust_volume(self, step):
         player = self.player

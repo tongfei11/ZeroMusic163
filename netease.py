@@ -38,12 +38,13 @@ def memory_available(minimum_mib):
 class NeteaseError(Exception):
     """A user-readable error which never includes raw CLI output."""
 
-    def __init__(self, message, *, reauth=False, check_session=False, retryable=False, unavailable=False):
+    def __init__(self, message, *, reauth=False, check_session=False, retryable=False, unavailable=False, retry_after=0):
         super().__init__(message)
         self.reauth = reauth
         self.check_session = check_session
         self.retryable = retryable
         self.unavailable = unavailable
+        self.retry_after = retry_after
 
 
 class Netease:
@@ -220,22 +221,25 @@ class Netease:
 
     @staticmethod
     def _error(payload, stderr=""):
-        message = str(payload.get("message", "")) if isinstance(payload, dict) else stderr
+        message = str(payload.get("message", "")) if isinstance(payload, dict) else ""
+        message = message + " " + stderr
+        code = payload.get("code") if isinstance(payload, dict) else None
         auth_terms = ("未登录", "请先登录", "未授权", "登录已过期", "登录失效", "重新登录", "token expired")
-        if any(term in message.lower() for term in auth_terms) or "HTTP 401" in message:
+        if any(term in message.lower() for term in auth_terms) or "HTTP 401" in message or code == 401:
             return NeteaseError("请先扫码登录网易云音乐。", reauth=True)
+        if any(term in message for term in ("请求总量超限", "额度已用尽", "调用次数已用尽")):
+            return NeteaseError("网易云音乐接口额度已用尽，请稍后再试。")
+        if code == 429 or any(term in message for term in ("HTTP 429", "限流", "请求过于频繁")):
+            return NeteaseError("请求过于频繁，请稍后重试。", retryable=True, retry_after=30)
         network_terms = ("fetch failed", "econnreset", "enotfound", "eai_again", "enetunreach",
                          "etimedout", "timeout", "超时", "连接失败", "network", "http 408",
                          "http 500", "http 502", "http 503", "http 504")
-        if any(term in message.lower() for term in network_terms):
+        if (isinstance(code, int) and 500 <= code <= 599) or any(term in message.lower() for term in network_terms):
             return NeteaseError("网络连接失败，请稍后重试。", retryable=True)
-        if any(term in message for term in ("不可播放", "无播放权限", "无版权", "未购买")):
+        if any(term in message for term in ("不可播放", "无播放权限", "无版权", "未购买", "歌曲已下架", "歌曲不存在")):
             return NeteaseError("这首歌暂不可播放。", unavailable=True)
         for terms, user_message in (
             (("mpv not found", "未安装 mpv", "找不到 mpv", "mpv 未安装"), "找不到 mpv，请检查安装。"),
-            (("请求总量超限", "限流"), "网易云音乐请求次数已达上限。"),
-            (("fetch failed", "ECONNRESET", "ENOTFOUND", "HTTP 502", "HTTP 503", "HTTP 504"),
-             "连接网易云音乐失败，按 Enter 重试。"),
             (("匿名登录失败", "签名失败", "凭证无效"), "网易云音乐未能验证应用凭据，请检查 App ID、Private Key 和网络。"),
         ):
             if any(term in message for term in terms):
@@ -592,7 +596,7 @@ class Netease:
         except MpvError as error:
             with self._media_lock:
                 self._media_urls.pop(key, None)
-            raise NeteaseError(str(error), retryable="解码" not in str(error), unavailable="解码" in str(error)) from None
+            raise NeteaseError(str(error), retryable=error.retryable, unavailable=error.unavailable) from None
 
     def _fetch_media(self, home, key):
         if self._supports_resident():
@@ -679,6 +683,11 @@ class Netease:
                 player.command("set_property", "pause", command == "pause")
             elif command == "volume":
                 player.command("set_property", "volume", int(args[0]))
+            elif command == "seek":
+                target = float(args[0])
+                if not 0 <= target < float("inf"):
+                    raise NeteaseError("无效的播放位置。")
+                player.command("seek", target, "absolute+exact")
             else:
                 raise NeteaseError("未知的播放操作。")
         except MpvError as error:
