@@ -16,7 +16,7 @@ install -d "$runtime"
 install -m 0644 package.json package-lock.json "$runtime/"
 npm --prefix "$runtime" ci --omit=dev --ignore-scripts --no-audit --no-fund
 
-sudo install -d /usr/local/lib/zero-music
+sudo install -d /usr/local/lib/zero-music163
 sudo install -m 0644 app.py device.py netease.py player.py setup_web.py zero_music163.py \
   ncm-isolate.cjs VERSION /usr/local/lib/zero-music163/
 sudo install -D -m 0644 zero-music163.png /usr/share/APPLaunch/share/images/zero-music163.png
