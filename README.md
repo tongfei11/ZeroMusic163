@@ -39,7 +39,7 @@ Enable background playback in Settings to keep playing after leaving the app. To
 
 ## Known issue with Bluetooth playback
 
-On the tested Cardputer Zero, Galaxy Buds2 Pro audio sometimes stuttered or distorted while the built-in Wi-Fi was active. The earbuds also occasionally switched from A2DP stereo to the hands-free profile and went silent. Playback was smoother with Wi-Fi temporarily disabled during a test using already buffered audio. For online playback, use the built-in speaker if Bluetooth audio is unstable.
+On the tested Cardputer Zero, Galaxy Buds2 Pro audio sometimes stuttered or distorted while the built-in Wi-Fi was active. The earbuds also occasionally switched from A2DP stereo to the hands-free profile and went silent. In a short test, we turned Wi-Fi off while a song was playing. Playback became smoother while the song continued from its existing buffer. For online playback, use the built-in speaker if Bluetooth audio is unstable.
 
 ## Uninstall or build
 
