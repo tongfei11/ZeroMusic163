@@ -132,10 +132,16 @@ def run(args):
                     break
                 view = app.view()
                 elapsed = view.pop("title_scroll", None)
-                offset, interval = (0, 0.12) if elapsed is None else title_scroll_frame(view["heading"], elapsed)
                 row_elapsed = view.pop("row_scroll_elapsed", None)
+                exit_prompt = "exit_progress" in view
+                toast_visible = exit_prompt or bool(view.get("notice"))
+                offset, interval = 0, 0.12
+                if exit_prompt:
+                    interval = 0.05
+                elif elapsed is not None and not toast_visible:
+                    offset, interval = title_scroll_frame(view["heading"], elapsed)
                 row_offset = 0
-                if row_elapsed is not None:
+                if row_elapsed is not None and not toast_visible:
                     row_offset, row_interval = row_scroll_frame(view, row_elapsed)
                     interval = min(interval, row_interval)
                 if view != last:

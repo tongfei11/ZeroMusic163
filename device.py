@@ -170,7 +170,7 @@ def selected_row_title(view):
         return None
     top = 58 + (16 if view.get("detail") else 0) if view.get("tab") is not None else 36
     height = 23 if view.get("tab") is not None else 47
-    bottom = 130 if view.get("notice") else FOOTER_TOP - 2
+    bottom = FOOTER_TOP - 2
     if view.get("progress"):
         bottom -= 23
     count = max(1, (bottom - top + 1) // height)
@@ -425,16 +425,61 @@ def draw_playback(image, draw, view):
     for index, lyric in enumerate((view.get("lyric_preview") or [])[:2]):
         line(draw, lyric, 10, 93 + index * 13, 193, 11, ACCENT if index == 0 else MUTED)
     draw_record(image, draw, playback.get("artwork"))
-    notice = view.get("notice")
-    if not notice and playback.get("status") == "failed":
-        notice = "播放失败"
-    if notice:
-        draw.rounded_rectangle((6, 118, 204, 134), radius=4, fill=SURFACE)
-        line(draw, notice, 10, 121, 190, 11, ACCENT)
+    if playback.get("status") == "failed":
+        line(draw, "播放失败", 10, 121, 190, 11, ACCENT)
     draw_transport(draw, playback)
 
 
 def render(view):
+    image = render_screen(view)
+    progress = view.get("exit_progress")
+    message = "继续按住 Esc 退出" if progress is not None else view.get("notice")
+    if message:
+        toast = toast_image(message, progress)
+        image.paste(toast, ((SIZE[0] - toast.width) // 2, (SIZE[1] - toast.height) // 2), toast)
+    return image
+
+
+@lru_cache(maxsize=16)
+def toast_lines(message):
+    rows = []
+    face = font(15)
+    for paragraph in message.splitlines():
+        row = ""
+        for char in paragraph:
+            if row and face.getlength(row + char) > 252:
+                rows.append(row.rstrip())
+                row = "" if char.isspace() else char
+            else:
+                row += char
+        rows.append(row)
+    return rows
+
+
+def toast_image(message, progress):
+    rows = toast_lines(message)
+    face = font(15)
+    width = min(284, max(150, round(max(map(face.getlength, rows), default=0)) + 32))
+    height = 22 + 20 * min(6, len(rows)) + (12 if progress is not None else 0)
+    toast = Image.new("RGBA", (width, height))
+    draw = ImageDraw.Draw(toast)
+    draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=9, fill=(0, 0, 0, 200))
+    for index, row in enumerate(rows[:6]):
+        if index == 5 and len(rows) > 6:
+            line(draw, row + "…", 16, 12 + index * 20, width - 32, 15, WHITE)
+        else:
+            draw.text((width // 2, 12 + index * 20), row, fill=WHITE, font=face, anchor="mt")
+    if progress is not None:
+        left, right = 16, width - 17
+        top = height - 16
+        draw.rounded_rectangle((left, top, right, top + 4), radius=2, fill=(255, 255, 255, 85))
+        filled = round((right - left + 1) * progress)
+        if filled:
+            draw.rounded_rectangle((left, top, left + filled - 1, top + 4), radius=2, fill=WHITE)
+    return toast
+
+
+def render_screen(view):
     image = Image.new("RGB", SIZE, BACKGROUND)
     draw = ImageDraw.Draw(image)
     tab = view.get("tab")
@@ -448,17 +493,16 @@ def render(view):
         return image
     if view.get("profile_name"):
         draw_profile(image, draw, view)
-        draw_footer(draw, view.get("footer"), view.get("notice"))
+        draw_footer(draw, view.get("footer"))
         return image
 
     detail = view.get("detail")
     rows = view.get("rows") or []
-    footer_top = FOOTER_TOP
-    body_bottom = 130 if view.get("notice") else footer_top - 2
+    body_bottom = FOOTER_TOP - 2
     progress = view.get("progress")
     if view.get("qr"):
         code = qr_image(view["qr"])
-        image.paste(code, (10, (footer_top - code.height) // 2))
+        image.paste(code, (10, (FOOTER_TOP - code.height) // 2))
         x = code.width + 21
         line(draw, view.get("heading"), x, 20, 311 - x, 17)
         details(draw, detail, x, 49, 311 - x, body_bottom)
@@ -506,19 +550,10 @@ def render(view):
         if progress:
             draw_progress(draw, progress, 10, body_bottom - 18, 300)
 
-    if view.get("notice"):
-        if view.get("qr"):
-            line(draw, view["notice"], x, footer_top - 19, 311 - x, 13, ACCENT)
-        else:
-            draw.rectangle((0, footer_top - 21, 319, footer_top - 1), fill=SURFACE)
-            line(draw, view["notice"], 10, footer_top - 18, 300, 14, ACCENT)
     draw_footer(draw, view.get("footer"))
     return image
 
 
-def draw_footer(draw, footer, notice=None):
-    if notice:
-        draw.rectangle((0, FOOTER_TOP, 319, 169), fill=SURFACE)
-    else:
-        draw.line((0, FOOTER_TOP, 319, FOOTER_TOP), fill=SURFACE)
-    line(draw, notice or footer, 10, FOOTER_TOP + 3, 300, 12, ACCENT if notice else MUTED)
+def draw_footer(draw, footer):
+    draw.line((0, FOOTER_TOP, 319, FOOTER_TOP), fill=SURFACE)
+    line(draw, footer, 10, FOOTER_TOP + 3, 300, 12, MUTED)

@@ -2,10 +2,21 @@ from io import BytesIO
 import unittest
 from PIL import Image
 
-from device import Device, render, rgb565, row_scroll_frame, title_scroll_frame
+from device import Device, render, rgb565, row_scroll_frame, title_scroll_frame, toast_image, toast_lines
 
 
 class PlaybackTitleTest(unittest.TestCase):
+    def test_long_notice_wraps_and_exit_progress_shares_the_toast(self):
+        message = "网易云音乐命令执行失败，请检查登录状态和网络后重试。"
+        rows = toast_lines(message)
+        self.assertGreater(len(rows), 1)
+        self.assertEqual("".join(rows), message)
+        empty = toast_image("继续按住 Esc 退出", 0)
+        filled = toast_image("继续按住 Esc 退出", 0.5)
+        self.assertEqual(empty.size, filled.size)
+        self.assertEqual(filled.getpixel((30, filled.height - 14)), (255, 255, 255, 255))
+        self.assertEqual(empty.getpixel((30, empty.height - 14)), (255, 255, 255, 85))
+
     def test_framebuffer_color_encoding(self):
         image = Image.new("RGB", (4, 1))
         image.putdata([(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)])

@@ -24,6 +24,8 @@ SETTINGS = [("隐藏不可播放曲目", "hide-unplayable"), ("后台播放", "b
 MOVES = {"f": -1, "up": -1, "x": 1, "down": 1}
 VOLUME = {"s": -5, "volume-down": -5, "d": 5, "volume-up": 5}
 PRELOAD_TRACKS = 3
+ESC_EXIT_SECONDS = 3
+ESC_PROMPT_DELAY = 0.25
 PLAYBACK_HELP = [
     ("4 模式 · 5 上一首 · 6 播放 / 暂停", ""),
     ("7 下一首 · 8 收藏 / 取消收藏", ""),
@@ -139,7 +141,7 @@ class App:
 
     def tick(self):
         now = self.clock()
-        if self.esc_started is not None and now - self.esc_started >= 3:
+        if self.esc_started is not None and now - self.esc_started >= ESC_EXIT_SECONDS:
             self.running = False
         if not self.running:
             return
@@ -201,7 +203,7 @@ class App:
                             self.position_error)
 
     def notice(self, message, seconds=4):
-        self.notice_text, self.notice_until = message, self.clock() + seconds
+        self.notice_text, self.notice_until = message, self.clock() + min(seconds, 7)
 
     def error(self, error):
         if getattr(error, "reauth", False) and self.screen == "ready":
@@ -430,11 +432,11 @@ class App:
         if value == 1:
             self.last_key_at = self.clock()
         if key == "esc":
-            if value == 1:
+            if value == 1 and self.esc_started is None:
                 self.esc_started = self.clock()
             elif value == 0 and self.esc_started is not None:
                 elapsed, self.esc_started = self.clock() - self.esc_started, None
-                if elapsed >= 3:
+                if elapsed >= ESC_EXIT_SECONDS:
                     self.running = False
                 else:
                     self.back()
@@ -920,7 +922,8 @@ class App:
             if self.buffering_since is None:
                 self.buffering_since = self.clock()
                 self.notice("网络缓冲中 · 6 暂停 · 7 下一首", seconds=300)
-            elif self.clock() - self.buffering_since > 45 and not self.play_retry:
+            elif (self.clock() - self.buffering_since > 45 and not self.play_retry
+                  and self.notice_text != "缓冲较久 · Enter 重连 · 7 下一首"):
                 self.notice("缓冲较久 · Enter 重连 · 7 下一首", seconds=300)
         elif self.player.status == "playing" and self.buffering_since is not None:
             self.buffering_since = None
@@ -1294,9 +1297,14 @@ class App:
 
     def view(self):
         notice = self.notice_text if self.clock() < self.notice_until else ""
+        exit_prompt = {}
+        if self.esc_started is not None:
+            held = self.clock() - self.esc_started
+            if held >= ESC_PROMPT_DELAY:
+                exit_prompt["exit_progress"] = min(1, held / ESC_EXIT_SECONDS)
         if self.screen != "ready" and not self.confirmation:
-            return self.setup_view(notice)
-        view = {"tab": self.tab, "notice": notice}
+            return self.setup_view(notice) | exit_prompt
+        view = {"tab": self.tab, "notice": notice, **exit_prompt}
         if self.confirmation:
             title, _, selected = self.confirmation
             view.update(heading=title, rows=[("取消", ""), ("确认", "")], selected=selected,

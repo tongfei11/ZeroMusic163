@@ -482,6 +482,12 @@ class AppTest(unittest.TestCase):
     def test_escape_hold_exits_only_at_threshold(self):
         self.key("esc")
         self.assertTrue(self.app.running)
+        self.assertNotIn("exit_progress", self.app.view())
+        self.app.key("esc", 1)
+        self.time += 1.5
+        self.assertAlmostEqual(self.app.view()["exit_progress"], 0.5)
+        self.app.key("esc", 0)
+        self.assertNotIn("exit_progress", self.app.view())
         self.app.key("esc", 1)
         self.time += 2.99
         self.app.tick()
