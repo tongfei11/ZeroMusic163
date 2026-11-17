@@ -830,7 +830,7 @@ class App:
         track_id = player.current["id"]
         if self.clock() - self.track_started_at < 12:
             return
-        if "prefetch-audio" in self.jobs or not memory_available(128):
+        if "prefetch-audio" in self.jobs or not memory_available(72):
             return
         indices = list(self.next_indices())[:1] if player.mode != 2 else ()
         if indices and "prefetch-audio" not in self.jobs and self.clock() - self.track_started_at >= 3:

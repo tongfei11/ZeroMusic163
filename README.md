@@ -26,4 +26,6 @@ Cardputer Zero 上的网易云音乐播放器。构建号见 [VERSION](VERSION)�
 
 应用会记住歌曲和播放位置，重开后按 `6` 继续。打开「设置 → 后台播放」后，长按 `Esc` 退出界面时，正在播放的歌曲和队列会继续播放。
 
+应用启动时初始化一个常驻的官方 CLI 进程，搜索、歌单和播放地址共用该进程。此适配使用锁定的 CLI 0.1.7 命令树，升级官方 CLI 时需要一并验证适配。
+
 设备显示和键盘路径沿用 [Zero SSH](https://github.com/tongfei11/ZeroSSH) 的 Cardputer Zero 适配。搜索、曲库、授权与播放接入 [网易云官方 CLI 0.1.7](https://www.npmjs.com/package/@music163/ncm-cli)。

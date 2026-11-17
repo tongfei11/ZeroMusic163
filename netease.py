@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from mpv_ipc import Mpv, MpvError
+from ncm_resident import Resident
 
 
 PLAYLIST_PAGE_SIZE = 30
@@ -58,6 +59,8 @@ class Netease:
         self._audio_cache = None
         self._cancel_audio = Event()
         self._audio_fetch_key = None
+        self._resident = None
+        self._resident_home = None
 
     def configured(self) -> bool:
         home = self._current
@@ -83,6 +86,24 @@ class Netease:
                 raise NeteaseError("无法创建隔离的播放器目录。") from None
         return path
 
+    def _environment(self, home):
+        runtime = self._runtime(home)
+        environment = os.environ.copy()
+        environment.update({
+            "NODE_OPTIONS": f"--require {json.dumps(str(Path(__file__).with_name('ncm-isolate.cjs').resolve()))}",
+            "ZEROMUSIC_NCM_PROFILE": str(runtime / "home"),
+            "ZEROMUSIC_NCM_RUNTIME": str(runtime),
+            "XDG_CONFIG_HOME": str(home / ".config"), "TMPDIR": str(runtime),
+        })
+        environment.pop("ZEROMUSIC_NCM_CONFIG_INPUT", None)
+        environment.pop("ZEROMUSIC_NCM_MEDIA_FILE", None)
+        return environment
+
+    def _supports_resident(self):
+        entry = Path(self.executable).resolve()
+        return (sys.platform.startswith("linux") and entry.name == "index.js"
+                and entry.parent.parent.name == "ncm-cli")
+
     def _run(self, *args, home=None, private_input=None, allow_failure=False, allow_empty=False, media_file=None):
         with self._lock:
             if home is None:
@@ -90,17 +111,7 @@ class Netease:
                     raise NeteaseError("请先配置网易云音乐 App ID 和 Private Key。")
                 home = self._current.resolve(strict=True)
             try:
-                environment = os.environ.copy()
-                runtime = self._runtime(home)
-                preload = Path(__file__).with_name("ncm-isolate.cjs").resolve()
-                environment.update({
-                    "NODE_OPTIONS": f"--require {json.dumps(str(preload), ensure_ascii=False)}",
-                    "ZEROMUSIC_NCM_PROFILE": str(runtime / "home"),
-                    "ZEROMUSIC_NCM_RUNTIME": str(runtime),
-                    "XDG_CONFIG_HOME": str(home / ".config"),
-                    "TMPDIR": str(runtime),
-                })
-                environment.pop("ZEROMUSIC_NCM_CONFIG_INPUT", None)
+                environment = self._environment(home)
                 if private_input is not None:
                     environment["ZEROMUSIC_NCM_CONFIG_INPUT"] = "1"
                 if media_file is not None:
@@ -125,6 +136,10 @@ class Netease:
             return payload
 
     def _invoke(self, args, environment, home, private_input):
+        if (self._supports_resident() and args[0] not in
+                ("login", "logout", "config", "configure", "play", "stop")):
+            return self._resident_request({"args": list(map(str, args))}, environment, home)
+        self._close_resident()
         with self._process_lock:
             if self._closing and args[0] != "stop":
                 raise NeteaseError("播放器正在退出。")
@@ -153,6 +168,30 @@ class Netease:
             with self._process_lock:
                 self._process = None
 
+    def _resident_request(self, request, environment, home):
+        with self._process_lock:
+            if self._closing:
+                raise NeteaseError("播放器正在退出。")
+            if self._resident is not None and (self._resident_home != home or
+                                                self._resident.process.poll() is not None):
+                self._resident.close()
+                self._resident = None
+            if self._resident is None:
+                self._resident = Resident(self.executable, environment, home)
+                self._resident_home = home
+            resident = self._resident
+        try:
+            return resident.request(request)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            self._close_resident()
+            raise
+
+    def _close_resident(self):
+        with self._process_lock:
+            resident, self._resident = self._resident, None
+        if resident is not None:
+            resident.close()
+
     def cancel_pending(self):
         with self._process_lock:
             self._closing = True
@@ -160,6 +199,7 @@ class Netease:
                 self._process.kill()
         self._cancel_audio.set()
         self._discard_audio_cache()
+        self._close_resident()
 
     def _discard_audio_cache(self):
         with self._media_lock:
@@ -505,11 +545,23 @@ class Netease:
             raise NeteaseError(str(error)) from None
 
     def _fetch_media(self, home, key):
-        with tempfile.TemporaryDirectory(prefix="media-", dir=self._runtime(home)) as staging:
-            media_file = Path(staging) / "response.json"
-            self._run("play", "--song", "--encrypted-id", key[0], "--original-id", key[1],
-                      allow_empty=True, media_file=media_file)
-            payload = self._wait_for_media(media_file)
+        if self._supports_resident():
+            with self._lock:
+                try:
+                    output, errors, code = self._resident_request({"media": key[0]}, self._environment(home), home)
+                    data = json.loads(output)
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    raise NeteaseError("网易云音乐请求失败，请重试。") from None
+                if code or not isinstance(data, dict) or data.get("code") != 200:
+                    raise self._error(data, errors)
+                media = data.get("data") or {}
+                payload = {"url": media.get("playUrl"), "expiresAt": media.get("playUrlExpireTime")}
+        else:
+            with tempfile.TemporaryDirectory(prefix="media-", dir=self._runtime(home)) as staging:
+                media_file = Path(staging) / "response.json"
+                self._run("play", "--song", "--encrypted-id", key[0], "--original-id", key[1],
+                          allow_empty=True, media_file=media_file)
+                payload = self._wait_for_media(media_file)
         url = payload.get("url")
         try:
             location = urlsplit(url) if isinstance(url, str) else None

@@ -1,10 +1,16 @@
 from io import BytesIO
 import unittest
+from PIL import Image
 
 from device import Device, render, rgb565, title_scroll_frame
 
 
 class PlaybackTitleTest(unittest.TestCase):
+    def test_framebuffer_color_encoding(self):
+        image = Image.new("RGB", (4, 1))
+        image.putdata([(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)])
+        self.assertEqual(rgb565(image), b"\x00\xf8\xe0\x07\x1f\x00\xff\xff")
+
     def test_scrolling_title_updates_match_a_full_frame(self):
         title = "很长的歌曲名称" * 6
         view = {"tab": 2, "heading": title, "detail": "歌手", "progress": (2, 100),

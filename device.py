@@ -6,7 +6,7 @@ import struct
 from contextlib import ExitStack
 from functools import lru_cache
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
 SIZE = (320, 170)
 FRAMEBUFFER = "/dev/fb_lcd"
@@ -69,13 +69,18 @@ class Device:
 
 
 def rgb565(image):
-    pixels = bytearray(image.width * image.height * 2)
     if image.mode != "RGB":
         image = image.convert("RGB")
-    for index, (red, green, blue) in enumerate(image.getdata()):
-        color = ((red & 248) << 8) | ((green & 252) << 3) | (blue >> 3)
-        struct.pack_into("<H", pixels, index * 2, color)
-    return pixels
+    red, green, blue = image.split()
+    low = ImageChops.add(green.point(GREEN_LOW), blue.point(BLUE_LOW))
+    high = ImageChops.add(red.point(RED_HIGH), green.point(GREEN_HIGH))
+    return bytearray(Image.merge("LA", (low, high)).tobytes())
+
+
+RED_HIGH = [value & 248 for value in range(256)]
+GREEN_HIGH = [value >> 5 for value in range(256)]
+GREEN_LOW = [(value & 28) << 3 for value in range(256)]
+BLUE_LOW = [value >> 3 for value in range(256)]
 
 
 BACKGROUND = "#fffdfd"
