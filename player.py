@@ -69,12 +69,16 @@ class Player:
         volume = state.get("volume")
         if isinstance(volume, (int, float)):
             self.volume = int(volume)
-        if status == "playing":
-            self.position = number(state.get("position"))
-            self.duration = number(state.get("duration"))
-            self.status, self.seen_playing = "playing", True
+        if status in ("playing", "paused"):
+            position, duration = state.get("position"), state.get("duration")
+            if isinstance(position, (int, float)):
+                self.position = number(position)
+                self.seen_playing = True
+            if isinstance(duration, (int, float)) and duration > 0:
+                self.duration = number(duration)
+            self.status = status
             return False
-        if self.status == "paused":
+        if status == "unknown" or self.status == "paused":
             return False
         if status == "stopped" and self.seen_playing and self.status == "playing":
             # The CLI resets the position at EOF. Keep the most recent playing position.

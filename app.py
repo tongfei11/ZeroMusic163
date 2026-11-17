@@ -552,6 +552,7 @@ class App:
             if previous:
                 self.player.history.pop()
             self.player.jump(track, remaining, remember=not previous)
+            self.player.status = "playing"
             self.track_started_at, self.next_poll = self.clock(), 0
             self.queue_selection = 0
             self.preload_attempt = None
