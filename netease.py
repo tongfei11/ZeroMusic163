@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from threading import Event, Lock, RLock
 import time
@@ -19,7 +20,17 @@ from mpv_ipc import Mpv, MpvError
 
 PLAYLIST_PAGE_SIZE = 30
 AUDIO_CACHE_LIMIT = 8 * 1024 * 1024
-AUDIO_CACHE_RATE = 128 * 1024
+AUDIO_CACHE_RATE = 64 * 1024
+
+
+def memory_available(minimum_mib):
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) >= minimum_mib * 1024
+    except (OSError, ValueError):
+        pass
+    return True
 
 
 class NeteaseError(Exception):
@@ -118,6 +129,7 @@ class Netease:
             if self._closing and args[0] != "stop":
                 raise NeteaseError("播放器正在退出。")
             process = subprocess.Popen(
+                (["nice", "-n", "10"] if sys.platform.startswith("linux") else []) +
                 [self.executable, *map(str, args)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -416,7 +428,10 @@ class Netease:
                 with tempfile.NamedTemporaryFile(dir=self.profile, prefix=".next-audio-", delete=False) as output:
                     staging = Path(output.name)
                     size = 0
-                    while not self._cancel_audio.is_set() and time.monotonic() - start < 75:
+                    while not self._cancel_audio.is_set() and time.monotonic() - start < 150:
+                        if not memory_available(64):
+                            self._cancel_audio.wait(0.5)
+                            continue
                         chunk = response.read1(32768)
                         if not chunk:
                             break

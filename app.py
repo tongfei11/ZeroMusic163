@@ -9,7 +9,7 @@ from time import monotonic
 
 from artwork import download_thumbnail
 
-from netease import NeteaseError, PLAYLIST_PAGE_SIZE
+from netease import NeteaseError, PLAYLIST_PAGE_SIZE, memory_available
 from playback_resume import load_resume, save_resume
 from player import MODES, Player, PlaylistTail, artists, lyric_lines, number, playable, track_rows
 from setup_web import SetupWeb
@@ -828,7 +828,11 @@ class App:
                for key in self.jobs):
             return
         track_id = player.current["id"]
-        indices = self.next_indices() if player.mode != 2 else ()
+        if self.clock() - self.track_started_at < 12:
+            return
+        if "prefetch-audio" in self.jobs or not memory_available(128):
+            return
+        indices = list(self.next_indices())[:1] if player.mode != 2 else ()
         if indices and "prefetch-audio" not in self.jobs and self.clock() - self.track_started_at >= 3:
             following = player.upcoming[indices[0]]
             plan = (track_id, following["id"])

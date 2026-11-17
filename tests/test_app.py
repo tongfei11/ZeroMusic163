@@ -123,7 +123,7 @@ class AppTest(unittest.TestCase):
         self.key("4")
         preloaded = []
         self.client.preload = lambda track: preloaded.append(track["id"])
-        self.time = 3
+        self.time = 15
         self.app.tick()
         self.wait("preload")
         self.assertEqual(len(preloaded), 1)
@@ -139,7 +139,7 @@ class AppTest(unittest.TestCase):
         downloads = []
         self.client.prefetch_audio = lambda track: downloads.append(track["id"])
 
-        self.time = 3
+        self.time = 15
         self.app.tick()
         self.wait("prefetch-audio")
         self.app.tick()
