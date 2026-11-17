@@ -1,6 +1,6 @@
 # ZeroMusic163
 
-<img src="zero-music163.png" width="48" height="48" alt="">
+<img src="assets/zero-music163.png" width="48" height="48" alt="">
 
 English | [简体中文](README.zh-CN.md)
 
@@ -37,10 +37,16 @@ ZeroMusic163 is an independent third-party client.
 
 Enable background playback in Settings to keep playing after leaving the app. To resume the last saved position after reopening, press 6 on the playback tab. Switching accounts keeps your developer configuration. Initialization clears it and returns you to first-time setup.
 
+## Known issue with Bluetooth playback
+
+On the tested Cardputer Zero, Galaxy Buds2 Pro audio sometimes stuttered or distorted while the built-in Wi-Fi was active. The earbuds also occasionally switched from A2DP stereo to the hands-free profile and went silent. Playback was smoother with Wi-Fi temporarily disabled during a test using already buffered audio. For online playback, use the built-in speaker if Bluetooth audio is unstable.
+
 ## Uninstall or build
 
 Exit the app and run `python3 /usr/lib/zero-music163/uninstall.py` as the user who runs ZeroMusic163 to remove it and clear that user's local data.
 
 To build from source, run `sh packaging/build-deb.sh` on ARM64 Debian with Node.js 20, npm and Pillow. The package is written to `dist/`.
+
+Run the tests with `PYTHONPATH=src python3 -m unittest discover -s tests`.
 
 ZeroMusic163 uses the [official NetEase Cloud Music CLI](https://www.npmjs.com/package/@music163/ncm-cli). See [LICENSE](LICENSE) for the app's MIT license.

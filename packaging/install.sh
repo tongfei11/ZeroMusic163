@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd -- "$(dirname -- "$0")"
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd -- "$root/src"
 
 if [[ $(id -u) == 0 || $(uname -m) != aarch64 || ! -d /usr/share/APPLaunch/applications ]]; then
   echo '请在 Cardputer Zero 上，用运行 APPLaunch 的普通用户执行安装。' >&2
@@ -19,6 +20,6 @@ npm --prefix "$runtime" ci --omit=dev --ignore-scripts --no-audit --no-fund
 sudo install -d /usr/local/lib/zero-music163
 sudo install -m 0644 app.py artwork.py device.py mpv_ipc.py netease.py ncm_resident.py playback_resume.py player.py setup_web.py zero_music163.py uninstall.py \
   ncm-isolate.cjs ncm-resident.cjs VERSION /usr/local/lib/zero-music163/
-sudo install -D -m 0644 zero-music163.png /usr/share/APPLaunch/share/images/zero-music163.png
-sudo install -m 0644 zero-music163.desktop /usr/share/APPLaunch/applications/
+sudo install -D -m 0644 "$root/assets/zero-music163.png" /usr/share/APPLaunch/share/images/zero-music163.png
+sudo install -m 0644 "$root/packaging/zero-music163.desktop" /usr/share/APPLaunch/applications/
 printf '已安装 ZeroMusic163 %s。请从应用启动器打开。\n' "$(cat VERSION)"

@@ -2,12 +2,13 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+source_dir=$root/src
 modules=
 if [ "${1:-}" = --node-modules ] && [ "$#" -eq 2 ]; then modules=$2; shift 2; fi
 [ "$#" -eq 0 ] || { echo 'Usage: build-deb.sh [--node-modules PATH]' >&2; exit 2; }
 [ "$(dpkg --print-architecture)" = arm64 ] || { echo 'Build on Debian ARM64.' >&2; exit 1; }
 node -e 'if (Number(process.versions.node.split(".")[0]) < 20) process.exit(1)'
-version=$(node -p 'require(process.argv[1]).version' "$root/package.json")
+version=$(node -p 'require(process.argv[1]).version' "$source_dir/package.json")
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 trap 'exit 1' HUP INT TERM
@@ -19,7 +20,7 @@ chmod 755 "$stage"
 
 for file in app.py artwork.py device.py mpv_ipc.py ncm_resident.py netease.py playback_resume.py player.py \
     setup_web.py uninstall.py zero_music163.py ncm-isolate.cjs ncm-resident.cjs VERSION package.json package-lock.json; do
-    install -m 644 "$root/$file" "$app/"
+    install -m 644 "$source_dir/$file" "$app/"
 done
 if [ -n "$modules" ]; then
     python3 - "$modules" "$app" <<'PY'
@@ -51,9 +52,9 @@ else
 fi
 node "$app/node_modules/@music163/ncm-cli/dist/index.js" --version
 
-sed 's@/usr/local/lib/zero-music163/@/usr/lib/zero-music163/@' "$root/zero-music163.desktop" \
+sed 's@/usr/local/lib/zero-music163/@/usr/lib/zero-music163/@' "$root/packaging/zero-music163.desktop" \
     > "$launcher/applications/zero-music163.desktop"
-python3 - "$root/zero-music163.png" "$launcher/share/images/zero-music163.png" <<'PY'
+python3 - "$root/assets/zero-music163.png" "$launcher/share/images/zero-music163.png" <<'PY'
 from PIL import Image
 import sys
 

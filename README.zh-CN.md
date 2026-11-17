@@ -1,6 +1,6 @@
 # ZeroMusic163
 
-<img src="zero-music163.png" width="48" height="48" alt="">
+<img src="assets/zero-music163.png" width="48" height="48" alt="">
 
 [English](README.md) | 简体中文
 
@@ -45,10 +45,16 @@ Cardputer Zero 上的网易云音乐播放器，由第三方独立开发。
 
 设置依次为隐藏不可播放曲目、后台播放、初始化、切换账号。切换账号保留开发者配置并重新扫码。初始化须确认，会清除开发者配置、音乐登录、播放记录、队列和设置，然后打开首次配置网页。
 
+## 蓝牙播放已知问题
+
+实测 Cardputer Zero 连接 Galaxy Buds2 Pro 时，板载 Wi‑Fi 开启后可能出现间歇性卡顿或破音。耳机偶尔也会从 A2DP 立体声切到通话模式，导致无声。用已缓存的音频做对照时，临时关闭 Wi‑Fi 后播放明显更流畅。在线听歌时，若蓝牙输出不稳定，可切回内置扬声器。
+
 ## 卸载
 
 退出应用后，以日常使用 ZeroMusic163 的账户运行 `python3 /usr/lib/zero-music163/uninstall.py`。完整卸载会清除该账户的开发者信息、登录和本地数据。
 
 开发者可在 Debian ARM64、Node.js 20 环境运行 `sh packaging/build-deb.sh` 构建，产物写入 `dist/`。
+
+用 `PYTHONPATH=src python3 -m unittest discover -s tests` 运行测试。
 
 设备显示和键盘路径沿用 [Zero SSH](https://github.com/tongfei11/ZeroSSH) 的 Cardputer Zero 适配。搜索、曲库、授权与播放接入 [网易云官方 CLI 0.1.7](https://www.npmjs.com/package/@music163/ncm-cli)。
