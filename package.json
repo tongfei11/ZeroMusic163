@@ -1,0 +1,7 @@
+{
+  "name": "zero-music163-runtime",
+  "private": true,
+  "dependencies": {
+    "@music163/ncm-cli": "0.1.7"
+  }
+}
