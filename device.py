@@ -33,12 +33,20 @@ class Device:
     def show(self, image):
         if image.size != SIZE:
             raise ValueError("Expected a 320×170 image")
-        pixels = bytearray(SIZE[0] * SIZE[1] * 2)
-        for index, (red, green, blue) in enumerate(image.convert("RGB").getdata()):
-            color = ((red & 248) << 8) | ((green & 252) << 3) | (blue >> 3)
-            struct.pack_into("<H", pixels, index * 2, color)
+        self.pixels = rgb565(image)
+        self.write_frame()
+
+    def show_title(self, title, offset):
+        strip = rgb565(playback_title_strip(title, offset))
+        width = PLAYBACK_TITLE_WIDTH * 2
+        for row in range(PLAYBACK_TITLE_HEIGHT):
+            start = ((PLAYBACK_TITLE_Y + row) * SIZE[0] + PLAYBACK_TITLE_X) * 2
+            self.pixels[start:start + width] = strip[row * width:(row + 1) * width]
+        self.write_frame()
+
+    def write_frame(self):
         self.framebuffer.seek(0)
-        pending = memoryview(pixels)
+        pending = memoryview(self.pixels)
         while pending:
             written = self.framebuffer.write(pending)
             if not written:
@@ -59,6 +67,16 @@ class Device:
         self.resources.close()
 
 
+def rgb565(image):
+    pixels = bytearray(image.width * image.height * 2)
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    for index, (red, green, blue) in enumerate(image.getdata()):
+        color = ((red & 248) << 8) | ((green & 252) << 3) | (blue >> 3)
+        struct.pack_into("<H", pixels, index * 2, color)
+    return pixels
+
+
 BACKGROUND = "#fffdfd"
 SURFACE = "#f9e5e7"
 TEXT = "#291f23"
@@ -68,9 +86,12 @@ WHITE = "#ffffff"
 FOOTER_TOP = 151
 TABS = ("搜索", "歌单", "播放", "队列")
 PLAYBACK_TITLE_WIDTH = 193
+PLAYBACK_TITLE_HEIGHT = 20
+PLAYBACK_TITLE_X, PLAYBACK_TITLE_Y = 10, 35
 PLAYBACK_TITLE_SIZE = 17
-TITLE_SCROLL_SPEED = 20
-TITLE_SCROLL_PAUSE = 1.0
+TITLE_SCROLL_SPEED = 46
+TITLE_SCROLL_PAUSE = 0.55
+TITLE_SCROLL_FRAME = 1 / 25
 
 
 @lru_cache(maxsize=32)
@@ -108,25 +129,28 @@ def title_overflow(title):
     return max(0, right - PLAYBACK_TITLE_WIDTH)
 
 
-def title_scroll_offset(title, elapsed):
+def title_scroll_frame(title, elapsed):
     overflow = title_overflow(title)
     if not overflow:
-        return 0
+        return 0, 0.12
     travel = overflow / TITLE_SCROLL_SPEED
     phase = max(0.0, elapsed) % (travel + 2 * TITLE_SCROLL_PAUSE)
-    return min(overflow, max(0, int((phase - TITLE_SCROLL_PAUSE) * TITLE_SCROLL_SPEED)))
+    if phase < TITLE_SCROLL_PAUSE:
+        return 0, min(0.12, TITLE_SCROLL_PAUSE - phase)
+    if phase >= TITLE_SCROLL_PAUSE + travel:
+        return overflow, min(0.12, travel + 2 * TITLE_SCROLL_PAUSE - phase)
+    return int((phase - TITLE_SCROLL_PAUSE) * TITLE_SCROLL_SPEED), TITLE_SCROLL_FRAME
 
 
-def draw_playback_title(image, draw, title, offset):
-    x, y = 10, 35
-    face = font(PLAYBACK_TITLE_SIZE)
-    if not title_overflow(title):
-        draw.text((x, y), title, font=face, fill=TEXT, anchor="lt")
-        return
-    height = 21  # The artist name starts at y=56.
-    strip = Image.new("RGB", (PLAYBACK_TITLE_WIDTH, height), BACKGROUND)
-    ImageDraw.Draw(strip).text((-offset, 0), title, font=face, fill=TEXT, anchor="lt")
-    image.paste(strip, (x, y))
+@lru_cache(maxsize=4)
+def playback_title_image(title):
+    strip = Image.new("RGB", (PLAYBACK_TITLE_WIDTH + title_overflow(title), PLAYBACK_TITLE_HEIGHT), BACKGROUND)
+    ImageDraw.Draw(strip).text((0, 0), title, font=font(PLAYBACK_TITLE_SIZE), fill=TEXT, anchor="lt")
+    return strip
+
+
+def playback_title_strip(title, offset):
+    return playback_title_image(title).crop((offset, 0, offset + PLAYBACK_TITLE_WIDTH, PLAYBACK_TITLE_HEIGHT))
 
 
 def details(draw, value, x, y, width, bottom, size=13):
@@ -325,9 +349,10 @@ def draw_transport(draw, playback):
 
 def draw_playback(image, draw, view):
     playback = view["playback"]
-    draw_playback_title(image, draw, str(view.get("heading") or ""), view.get("title_scroll", 0))
+    title = str(view.get("heading") or "")
+    image.paste(playback_title_strip(title, view.get("title_scroll", 0)), (PLAYBACK_TITLE_X, PLAYBACK_TITLE_Y))
     line(draw, view.get("detail"), 10, 56, 163, 12, MUTED)
-    draw_volume(draw, playback.get("volume", 0), 183, 60)
+    draw_volume(draw, playback.get("volume", 0), 183, 63)
     draw_progress(draw, view.get("progress"), 10, 74, 191)
     for index, lyric in enumerate((view.get("lyric_preview") or [])[:2]):
         line(draw, lyric, 10, 93 + index * 13, 193, 11, ACCENT if index == 0 else MUTED)
